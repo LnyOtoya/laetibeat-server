@@ -1,0 +1,12 @@
+[package]
+name = "music_backend_source"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.0", features = ["fs"] }
+serde = { version = "1.0", features = ["derive"] }
+lofty = "0.18"
+sha1 = "0.10"
+thiserror = "1.0"
+music_backend_engine = { path = "../engine" }

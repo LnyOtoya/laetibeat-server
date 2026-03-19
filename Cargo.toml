@@ -1,6 +1,12 @@
-[package]
-name = "laetibeat-server"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = [
+    "crates/core",
+    "crates/engine",
+    "crates/source",
+    "crates/api",
+    "crates/server",
+]
 
-[dependencies]
+[workspace.package]
+version = "0.1.0"
+edition = "2021"

@@ -1,0 +1,13 @@
+[package]
+name = "music_backend_server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+axum = "0.6"
+music_backend_api = { path = "../api" }
+music_backend_core = { path = "../core" }
+music_backend_source = { path = "../source" }
