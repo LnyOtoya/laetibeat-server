@@ -14,6 +14,8 @@ use tokio_util::io::ReaderStream;
 use music_backend_source::AudioStream;
 use music_backend_source::AsyncReadSeek;
 
+
+
 use music_backend_core::{Controller, Command, PlayerState, CommandResult, RepeatMode, Event};
 
 // 统一响应结构
@@ -1158,10 +1160,7 @@ fn build_headers(
         .status(status)
         .header("Accept-Ranges", "bytes")
         .header("Content-Length", content_length.to_string())
-        .header("Content-Type", content_type)
-        .header("Access-Control-Allow-Origin", "*")
-        .header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        .header("Access-Control-Allow-Headers", "*");
+        .header("Content-Type", content_type);
     
     // 如果是 Range 请求，添加 Content-Range 头部
     if let (Some((start, end)), Some(total)) = (range, file_size) {
