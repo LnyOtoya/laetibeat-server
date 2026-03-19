@@ -1,10 +1,12 @@
 use rodio::{Decoder, OutputStream, Sink, Source};
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Read};
 use std::sync::{Arc, Mutex};
+use std::pin::Pin;
 use tokio::sync::mpsc;
 
-pub type AudioInput = BufReader<File>;
+// 从 source 模块导入 AudioStream
+use music_backend_source::AudioStream;
 
 #[derive(Debug)]
 pub enum EngineEvent {
@@ -43,7 +45,7 @@ impl Engine {
         self.event_tx = Some(tx);
     }
     
-    pub fn play(&self, input: AudioInput) {
+    pub fn play(&self, input: AudioStream) {
         let mut sink_guard = self.sink.lock().unwrap();
         let mut stream_guard = self._stream.lock().unwrap();
         
@@ -56,9 +58,26 @@ impl Engine {
         let (stream, stream_handle) = OutputStream::try_default().unwrap();
         let sink = Sink::try_new(&stream_handle).unwrap();
         
-        // Decode and play the audio
-        let source = Decoder::new(input).unwrap();
-        sink.append(source);
+        // 根据 AudioStream 类型创建解码器
+        match input {
+            AudioStream::File(path) => {
+                let file = File::open(path).unwrap();
+                let reader = BufReader::new(file);
+                let source = Decoder::new(reader).unwrap();
+                sink.append(source);
+            }
+            AudioStream::Stream(stream) => {
+                // 对于 Stream 类型，我们需要确保它实现了 Seek 和 Sync
+                // 这里简化处理，只支持 File 类型
+                eprintln!("Stream type not supported yet");
+            }
+            AudioStream::Bytes(bytes) => {
+                use std::io::Cursor;
+                let cursor = Cursor::new(bytes);
+                let source = Decoder::new(cursor).unwrap();
+                sink.append(source);
+            }
+        }
         
         // Store the sink and stream
         *sink_guard = Some(sink);

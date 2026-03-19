@@ -4,7 +4,6 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 
 use music_backend_core::{Controller, Command, PlayerState, CommandResult, RepeatMode, Event};
-use music_backend_source::Song;
 
 // 统一响应结构
 #[derive(Debug, Serialize)]
@@ -165,17 +164,13 @@ async fn status_v1(State(state): State<Arc<AppState>>) -> Json<PlayerState> {
 async fn library_v1(State(state): State<Arc<AppState>>) -> Json<Vec<LibraryResponse>> {
     let mut library = Vec::new();
     
-    // Get all sources from the controller
-    let sources = state.controller.get_sources();
-    
-    // For each source, get its library
-    for source in sources {
-        let source_library = std::pin::Pin::from(source.get_library()).await;
-        for song in source_library {
+    // Get library from source manager
+    if let Ok(tracks) = state.controller.get_source_manager().list().await {
+        for track in tracks {
             library.push(LibraryResponse {
-                id: song.id,
-                title: song.title,
-                artist: song.artist,
+                id: track.id,
+                title: track.title,
+                artist: track.artist,
             });
         }
     }
@@ -857,17 +852,13 @@ async fn status_v2(State(state): State<Arc<AppState>>) -> Json<ApiResponse<()>> 
 async fn library_v2(State(state): State<Arc<AppState>>) -> Json<ApiResponse<Vec<LibraryResponse>>> {
     let mut library = Vec::new();
     
-    // Get all sources from the controller
-    let sources = state.controller.get_sources();
-    
-    // For each source, get its library
-    for source in sources {
-        let source_library = std::pin::Pin::from(source.get_library()).await;
-        for song in source_library {
+    // Get library from source manager
+    if let Ok(tracks) = state.controller.get_source_manager().list().await {
+        for track in tracks {
             library.push(LibraryResponse {
-                id: song.id,
-                title: song.title,
-                artist: song.artist,
+                id: track.id,
+                title: track.title,
+                artist: track.artist,
             });
         }
     }

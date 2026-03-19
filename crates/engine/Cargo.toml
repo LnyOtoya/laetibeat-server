@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 rodio = "0.18"
 tokio = { version = "1.0", features = ["time", "sync"] }
+music_backend_source = { path = "../source" }

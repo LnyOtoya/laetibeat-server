@@ -1,5 +1,4 @@
 use std::sync::{Arc, RwLock};
-use std::pin::Pin;
 use tokio::sync::{mpsc, broadcast, oneshot};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -20,7 +19,7 @@ impl<T> VecExt for Vec<T> {
 }
 
 use music_backend_engine::{Engine, EngineEvent};
-use music_backend_source::{MusicSource, Song};
+use music_backend_source::{Track, SourceManager, SourceError};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum RepeatMode {
@@ -31,11 +30,11 @@ pub enum RepeatMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Queue {
-    pub tracks: Vec<Song>,
+    pub tracks: Vec<Track>,
     pub current_index: Option<usize>,
     pub shuffle: bool,
     pub repeat: RepeatMode,
-    pub original_order: Vec<Song>,
+    pub original_order: Vec<Track>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -90,7 +89,7 @@ impl std::fmt::Display for PlaybackStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerState {
     pub status: PlaybackStatus,
-    pub current: Option<Song>,
+    pub current: Option<Track>,
     pub position: u64,
     pub duration: u64,
     pub queue: Queue,
@@ -114,7 +113,7 @@ pub enum ControllerError {
     #[error("Source not found for song ID")]
     SourceNotFound,
     #[error("Error from source: {0}")]
-    SourceError(#[from] music_backend_source::SourceError),
+    SourceError(#[from] SourceError),
     #[error("Queue is empty")]
     QueueEmpty,
     #[error("Index out of bounds")]
@@ -125,11 +124,11 @@ pub struct Controller {
     command_tx: mpsc::Sender<CommandWithResponse>,
     state: Arc<RwLock<PlayerState>>,
     event_tx: broadcast::Sender<Event>,
-    sources: Arc<Vec<Box<dyn MusicSource>>>,
+    source_manager: Arc<SourceManager>,
 }
 
 impl Controller {
-    pub fn new(sources: Vec<Box<dyn MusicSource>>) -> Self {
+    pub fn new(source_manager: SourceManager) -> Self {
         let (command_tx, command_rx) = mpsc::channel(10);
         let (event_tx, _) = broadcast::channel(10);
         
@@ -147,13 +146,13 @@ impl Controller {
             },
         }));
         
-        let sources = Arc::new(sources);
+        let source_manager = Arc::new(source_manager);
         
         let controller = Self {
             command_tx,
             state,
             event_tx,
-            sources,
+            source_manager,
         };
         
         controller.spawn_worker(command_rx);
@@ -179,14 +178,14 @@ impl Controller {
         self.event_tx.subscribe()
     }
     
-    pub fn get_sources(&self) -> &Vec<Box<dyn MusicSource>> {
-        &self.sources
+    pub fn get_source_manager(&self) -> &SourceManager {
+        &self.source_manager
     }
     
     fn spawn_worker(&self, mut command_rx: mpsc::Receiver<CommandWithResponse>) {
         let state = self.state.clone();
         let event_tx = self.event_tx.clone();
-        let sources = self.sources.clone();
+        let source_manager = self.source_manager.clone();
         
         tokio::spawn(async move {
             let mut engine = Engine::new();
@@ -198,7 +197,7 @@ impl Controller {
             // Spawn task to handle engine events
             let state_clone = state.clone();
             let event_tx_clone = event_tx.clone();
-            let sources_clone = sources.clone();
+            let source_manager_clone = source_manager.clone();
             let mut engine_clone = engine.clone();
             
             tokio::spawn(async move {
@@ -238,29 +237,25 @@ impl Controller {
                                     }
                                     
                                     if let Some(song_id) = song_id {
-                                        if let Some((source, _)) = Self::parse_song_id(&song_id) {
-                                            if let Some(source_impl) = sources_clone.iter().find(|s| s.name() == source) {
-                                                match Pin::from(source_impl.get_stream(&song_id)).await {
-                                                    Ok(stream) => {
-                                                        engine_clone.play(stream);
+                                        match source_manager_clone.get_stream(&song_id).await {
+                                            Ok(stream) => {
+                                                engine_clone.play(stream);
+                                                
+                                                match state_clone.write() {
+                                                    Ok(mut state_write) => {
+                                                        state_write.status = PlaybackStatus::Playing;
+                                                        state_write.position = 0;
                                                         
-                                                        match state_clone.write() {
-                                                            Ok(mut state_write) => {
-                                                                state_write.status = PlaybackStatus::Playing;
-                                                                state_write.position = 0;
-                                                                
-                                                                let new_state = state_write.clone();
-                                                                let _ = event_tx_clone.send(Event::StateUpdated(new_state));
-                                                            },
-                                                            Err(e) => {
-                                                                eprintln!("Failed to acquire write lock: {:?}", e);
-                                                            }
-                                                        }
+                                                        let new_state = state_write.clone();
+                                                        let _ = event_tx_clone.send(Event::StateUpdated(new_state));
                                                     },
                                                     Err(e) => {
-                                                        eprintln!("Failed to get stream: {:?}", e);
+                                                        eprintln!("Failed to acquire write lock: {:?}", e);
                                                     }
                                                 }
+                                            },
+                                            Err(e) => {
+                                                eprintln!("Failed to get stream: {:?}", e);
                                             }
                                         }
                                     }
@@ -268,7 +263,7 @@ impl Controller {
                             },
                             RepeatMode::All => {
                                 // Play next song (wrap around if needed)
-                                Self::handle_next(&state_clone, &event_tx_clone, &sources_clone, &mut engine_clone).await;
+                                Self::handle_next(&state_clone, &event_tx_clone, &source_manager_clone, &mut engine_clone).await;
                             },
                             RepeatMode::Off => {
                                 // Stop playback
@@ -305,51 +300,39 @@ impl Controller {
                 let result = match command {
                     Command::Load { song_id } => {
                         // Load is allowed in any state
-                        if let Some((source, _)) = Self::parse_song_id(&song_id) {
-                            if let Some(source_impl) = sources.iter().find(|s| s.name() == source) {
-                                match Pin::from(source_impl.get_metadata(&song_id)).await {
-                                    Ok(song) => {
-                                        let mut state_write = match state.write() {
-                                            Ok(guard) => guard,
-                                            Err(e) => {
-                                                eprintln!("Failed to acquire write lock: {:?}", e);
-                                                let error = CommandResult::Error(format!("Failed to acquire write lock: {:?}", e));
-                                                response_tx.send(error).ok();
-                                                continue;
-                                            }
-                                        };
-                                        state_write.current = Some(song.clone());
-                                        state_write.status = PlaybackStatus::Stopped;
-                                        state_write.position = 0;
-                                        state_write.duration = 0;
-                                        
-                                        // Add to queue if not already present
-                                        if !state_write.queue.tracks.iter().any(|t| t.id == song_id) {
-                                            state_write.queue.tracks.push(song.clone());
-                                            state_write.queue.original_order.push(song);
-                                            state_write.queue.current_index = Some(state_write.queue.tracks.len() - 1);
-                                        }
-                                        
-                                        let new_state = state_write.clone();
-                                        let _ = event_tx.send(Event::StateUpdated(new_state));
-                                        CommandResult::Ok
-                                    }
+                        match source_manager.get_track(&song_id).await {
+                            Ok(track) => {
+                                let mut state_write = match state.write() {
+                                    Ok(guard) => guard,
                                     Err(e) => {
-                                        eprintln!("Failed to load metadata: {:?}", e);
-                                        let error = CommandResult::Error(format!("Failed to load metadata: {:?}", e));
+                                        eprintln!("Failed to acquire write lock: {:?}", e);
+                                        let error = CommandResult::Error(format!("Failed to acquire write lock: {:?}", e));
                                         response_tx.send(error).ok();
                                         continue;
                                     }
+                                };
+                                state_write.current = Some(track.clone());
+                                state_write.status = PlaybackStatus::Stopped;
+                                state_write.position = 0;
+                                state_write.duration = 0;
+                                
+                                // Add to queue if not already present
+                                if !state_write.queue.tracks.iter().any(|t| t.id == song_id) {
+                                    state_write.queue.tracks.push(track.clone());
+                                    state_write.queue.original_order.push(track);
+                                    state_write.queue.current_index = Some(state_write.queue.tracks.len() - 1);
                                 }
-                            } else {
-                                let error = CommandResult::Error("Source not found".to_string());
+                                
+                                let new_state = state_write.clone();
+                                let _ = event_tx.send(Event::StateUpdated(new_state));
+                                CommandResult::Ok
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to load track: {:?}", e);
+                                let error = CommandResult::Error(format!("Failed to load track: {:?}", e));
                                 response_tx.send(error).ok();
                                 continue;
                             }
-                        } else {
-                            let error = CommandResult::Error("Invalid song ID format".to_string());
-                            response_tx.send(error).ok();
-                            continue;
                         }
                     },
                     Command::Play => {
@@ -372,13 +355,11 @@ impl Controller {
                                     }
                                 };
                                 
-                                if let Some((source, _)) = Self::parse_song_id(&song_id) {
-                                    if let Some(source_impl) = sources.iter().find(|s| s.name() == source) {
-                                        match Pin::from(source_impl.get_stream(&song_id)).await {
-                                            Ok(stream) => {
-                                                engine.play(stream);
-                                                
-                                                let mut state_write = match state.write() {
+                                match source_manager.get_stream(&song_id).await {
+                                    Ok(stream) => {
+                                        engine.play(stream);
+                                        
+                                        let mut state_write = match state.write() {
                                             Ok(guard) => guard,
                                             Err(e) => {
                                                 eprintln!("Failed to acquire write lock: {:?}", e);
@@ -392,23 +373,13 @@ impl Controller {
                                         let new_state = state_write.clone();
                                         let _ = event_tx.send(Event::StateUpdated(new_state));
                                         CommandResult::Ok
-                                            }
-                                            Err(e) => {
-                                                    eprintln!("Failed to get stream: {:?}", e);
-                                                    let error = CommandResult::Error(format!("Failed to get stream: {:?}", e));
-                                                    response_tx.send(error).ok();
-                                                    continue;
-                                                }
-                                        }
-                                    } else {
-                                        let error = CommandResult::Error("Source not found".to_string());
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Failed to get stream: {:?}", e);
+                                        let error = CommandResult::Error(format!("Failed to get stream: {:?}", e));
                                         response_tx.send(error).ok();
                                         continue;
                                     }
-                                } else {
-                                    let error = CommandResult::Error("Invalid song ID format".to_string());
-                                    response_tx.send(error).ok();
-                                    continue;
                                 }
                             }
                             PlaybackStatus::Playing => {
@@ -480,7 +451,7 @@ impl Controller {
                     },
                     Command::Next => {
                         // Next is allowed in any state with a queue
-                        let result = Self::handle_next(&state, &event_tx, &sources, &mut engine).await;
+                        let result = Self::handle_next(&state, &event_tx, &source_manager, &mut engine).await;
                         if let CommandResult::Error(_) = result {
                             response_tx.send(result).ok();
                             continue;
@@ -489,7 +460,7 @@ impl Controller {
                     },
                     Command::Prev => {
                         // Prev is allowed in any state with a queue
-                        let result = Self::handle_prev(&state, &event_tx, &sources, &mut engine).await;
+                        let result = Self::handle_prev(&state, &event_tx, &source_manager, &mut engine).await;
                         if let CommandResult::Error(_) = result {
                             response_tx.send(result).ok();
                             continue;
@@ -498,44 +469,32 @@ impl Controller {
                     },
                     Command::AddToQueue { song_id } => {
                         // AddToQueue is allowed in any state
-                        if let Some((source, _)) = Self::parse_song_id(&song_id) {
-                            if let Some(source_impl) = sources.iter().find(|s| s.name() == source) {
-                                match Pin::from(source_impl.get_metadata(&song_id)).await {
-                                    Ok(song) => {
-                                        let mut state_write = match state.write() {
-                                            Ok(guard) => guard,
-                                            Err(e) => {
-                                                eprintln!("Failed to acquire write lock: {:?}", e);
-                                                let error = CommandResult::Error(format!("Failed to acquire write lock: {:?}", e));
-                                                response_tx.send(error).ok();
-                                                continue;
-                                            }
-                                        };
-                                        if !state_write.queue.tracks.iter().any(|t| t.id == song_id) {
-                                            state_write.queue.tracks.push(song.clone());
-                                            state_write.queue.original_order.push(song);
-                                        }
-                                        
-                                        let new_state = state_write.clone();
-                                        let _ = event_tx.send(Event::StateUpdated(new_state));
-                                        CommandResult::Ok
-                                    }
+                        match source_manager.get_track(&song_id).await {
+                            Ok(track) => {
+                                let mut state_write = match state.write() {
+                                    Ok(guard) => guard,
                                     Err(e) => {
-                                        eprintln!("Failed to load metadata: {:?}", e);
-                                        let error = CommandResult::Error(format!("Failed to load metadata: {:?}", e));
+                                        eprintln!("Failed to acquire write lock: {:?}", e);
+                                        let error = CommandResult::Error(format!("Failed to acquire write lock: {:?}", e));
                                         response_tx.send(error).ok();
                                         continue;
                                     }
+                                };
+                                if !state_write.queue.tracks.iter().any(|t| t.id == song_id) {
+                                    state_write.queue.tracks.push(track.clone());
+                                    state_write.queue.original_order.push(track);
                                 }
-                            } else {
-                                let error = CommandResult::Error("Source not found".to_string());
+                                
+                                let new_state = state_write.clone();
+                                let _ = event_tx.send(Event::StateUpdated(new_state));
+                                CommandResult::Ok
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to load track: {:?}", e);
+                                let error = CommandResult::Error(format!("Failed to load track: {:?}", e));
                                 response_tx.send(error).ok();
                                 continue;
                             }
-                        } else {
-                            let error = CommandResult::Error("Invalid song ID format".to_string());
-                            response_tx.send(error).ok();
-                            continue;
                         }
                     },
                     Command::RemoveFromQueue { index } => {
@@ -606,11 +565,11 @@ impl Controller {
                             // Shuffle tracks while keeping current song at current index
                             if let Some(current_index) = state_write.queue.current_index {
                                 if current_index < state_write.queue.tracks.len() {
-                                    let current_song = state_write.queue.tracks.remove(current_index);
+                                    let current_track = state_write.queue.tracks.remove(current_index);
                                     use rand::seq::SliceRandom;
                                     let mut rng = rand::thread_rng();
                                     state_write.queue.tracks.shuffle(&mut rng);
-                                    state_write.queue.tracks.insert(current_index, current_song);
+                                    state_write.queue.tracks.insert(current_index, current_track);
                                 }
                             } else if !state_write.queue.tracks.is_empty() {
                                 use rand::seq::SliceRandom;
@@ -645,7 +604,7 @@ impl Controller {
                     },
                     Command::PlayAtIndex { index } => {
                         // PlayAtIndex is allowed in any state with a queue
-                        let (song, song_id) = {
+                        let (track, track_id) = {
                             let state_read = match state.read() {
                                 Ok(guard) => guard,
                                 Err(e) => {
@@ -656,9 +615,9 @@ impl Controller {
                                 }
                             };
                             if index < state_read.queue.tracks.len() {
-                                let song = state_read.queue.tracks[index].clone();
-                                let song_id = song.id.clone();
-                                (song, song_id)
+                                let track = state_read.queue.tracks[index].clone();
+                                let track_id = track.id.clone();
+                                (track, track_id)
                             } else {
                                 drop(state_read);
                                 let error = CommandResult::Error("Index out of bounds".to_string());
@@ -667,46 +626,34 @@ impl Controller {
                             }
                         };
                         
-                        if let Some((source, _)) = Self::parse_song_id(&song_id) {
-                            if let Some(source_impl) = sources.iter().find(|s| s.name() == source) {
-                                match Pin::from(source_impl.get_stream(&song_id)).await {
-                                    Ok(stream) => {
-                                        engine.play(stream);
-                                        
-                                        let mut state_write = match state.write() {
-                                            Ok(guard) => guard,
-                                            Err(e) => {
-                                                eprintln!("Failed to acquire write lock: {:?}", e);
-                                                let error = CommandResult::Error(format!("Failed to acquire write lock: {:?}", e));
-                                                response_tx.send(error).ok();
-                                                continue;
-                                            }
-                                        };
-                                        state_write.current = Some(song);
-                                        state_write.queue.current_index = Some(index);
-                                        state_write.status = PlaybackStatus::Playing;
-                                        state_write.position = 0;
-                                        
-                                        let new_state = state_write.clone();
-                                        let _ = event_tx.send(Event::StateUpdated(new_state));
-                                        CommandResult::Ok
-                                    }
+                        match source_manager.get_stream(&track_id).await {
+                            Ok(stream) => {
+                                engine.play(stream);
+                                
+                                let mut state_write = match state.write() {
+                                    Ok(guard) => guard,
                                     Err(e) => {
-                                        eprintln!("Failed to get stream: {:?}", e);
-                                        let error = CommandResult::Error(format!("Failed to get stream: {:?}", e));
+                                        eprintln!("Failed to acquire write lock: {:?}", e);
+                                        let error = CommandResult::Error(format!("Failed to acquire write lock: {:?}", e));
                                         response_tx.send(error).ok();
                                         continue;
                                     }
-                                }
-                            } else {
-                                let error = CommandResult::Error("Source not found".to_string());
+                                };
+                                state_write.current = Some(track);
+                                state_write.queue.current_index = Some(index);
+                                state_write.status = PlaybackStatus::Playing;
+                                state_write.position = 0;
+                                
+                                let new_state = state_write.clone();
+                                let _ = event_tx.send(Event::StateUpdated(new_state));
+                                CommandResult::Ok
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to get stream: {:?}", e);
+                                let error = CommandResult::Error(format!("Failed to get stream: {:?}", e));
                                 response_tx.send(error).ok();
                                 continue;
                             }
-                        } else {
-                            let error = CommandResult::Error("Invalid song ID format".to_string());
-                            response_tx.send(error).ok();
-                            continue;
                         }
                     },
                 };
@@ -722,10 +669,10 @@ impl Controller {
     async fn handle_next(
         state: &Arc<RwLock<PlayerState>>,
         event_tx: &broadcast::Sender<Event>,
-        sources: &Arc<Vec<Box<dyn MusicSource>>>,
+        source_manager: &Arc<SourceManager>,
         engine: &mut Engine,
     ) -> CommandResult {
-        let (next_index, _song_id, song) = {
+        let (next_index, track) = {
             let state_read = match state.read() {
                 Ok(guard) => guard,
                 Err(e) => {
@@ -750,47 +697,38 @@ impl Controller {
             };
             
             if let Some(index) = next_index {
-                let song_id = queue.tracks[index].id.clone();
-                let song = queue.tracks[index].clone();
-                (next_index, song_id, Some(song))
+                let track = queue.tracks[index].clone();
+                (next_index, Some(track))
             } else {
-                (None, String::new(), None)
+                (None, None)
             }
         };
         
-        if let (Some(index), Some(song)) = (next_index, song) {
-            if let Some((source, _)) = Self::parse_song_id(&song.id) {
-                if let Some(source_impl) = sources.iter().find(|s| s.name() == source) {
-                    match Pin::from(source_impl.get_stream(&song.id)).await {
-                        Ok(stream) => {
-                            engine.play(stream);
-                            
-                            let mut state_write = match state.write() {
-                                Ok(guard) => guard,
-                                Err(e) => {
-                                    eprintln!("Failed to acquire write lock: {:?}", e);
-                                    return CommandResult::Error(format!("Failed to acquire write lock: {:?}", e));
-                                }
-                            };
-                            state_write.current = Some(song);
-                            state_write.queue.current_index = Some(index);
-                            state_write.status = PlaybackStatus::Playing;
-                            state_write.position = 0;
-                            
-                            let new_state = state_write.clone();
-                            let _ = event_tx.send(Event::StateUpdated(new_state));
-                            CommandResult::Ok
-                        }
+        if let (Some(index), Some(track)) = (next_index, track) {
+            match source_manager.get_stream(&track.id).await {
+                Ok(stream) => {
+                    engine.play(stream);
+                    
+                    let mut state_write = match state.write() {
+                        Ok(guard) => guard,
                         Err(e) => {
-                            eprintln!("Failed to get stream: {:?}", e);
-                            CommandResult::Error(format!("Failed to get stream: {:?}", e))
+                            eprintln!("Failed to acquire write lock: {:?}", e);
+                            return CommandResult::Error(format!("Failed to acquire write lock: {:?}", e));
                         }
-                    }
-                } else {
-                    CommandResult::Error("Source not found".to_string())
+                    };
+                    state_write.current = Some(track);
+                    state_write.queue.current_index = Some(index);
+                    state_write.status = PlaybackStatus::Playing;
+                    state_write.position = 0;
+                    
+                    let new_state = state_write.clone();
+                    let _ = event_tx.send(Event::StateUpdated(new_state));
+                    CommandResult::Ok
                 }
-            } else {
-                CommandResult::Error("Invalid song ID format".to_string())
+                Err(e) => {
+                    eprintln!("Failed to get stream: {:?}", e);
+                    CommandResult::Error(format!("Failed to get stream: {:?}", e))
+                }
             }
         } else {
             CommandResult::Error("No next song available".to_string())
@@ -800,10 +738,10 @@ impl Controller {
     async fn handle_prev(
         state: &Arc<RwLock<PlayerState>>,
         event_tx: &broadcast::Sender<Event>,
-        sources: &Arc<Vec<Box<dyn MusicSource>>>,
+        source_manager: &Arc<SourceManager>,
         engine: &mut Engine,
     ) -> CommandResult {
-        let (prev_index, song) = {
+        let (prev_index, track) = {
             let state_read = match state.read() {
                 Ok(guard) => guard,
                 Err(e) => {
@@ -828,57 +766,41 @@ impl Controller {
             };
             
             if let Some(index) = prev_index {
-                let song = queue.tracks[index].clone();
-                (prev_index, Some(song))
+                let track = queue.tracks[index].clone();
+                (prev_index, Some(track))
             } else {
                 (None, None)
             }
         };
         
-        if let (Some(index), Some(song)) = (prev_index, song) {
-            if let Some((source, _)) = Self::parse_song_id(&song.id) {
-                if let Some(source_impl) = sources.iter().find(|s| s.name() == source) {
-                    match Pin::from(source_impl.get_stream(&song.id)).await {
-                        Ok(stream) => {
-                            engine.play(stream);
-                            
-                            let mut state_write = match state.write() {
-                                Ok(guard) => guard,
-                                Err(e) => {
-                                    eprintln!("Failed to acquire write lock: {:?}", e);
-                                    return CommandResult::Error(format!("Failed to acquire write lock: {:?}", e));
-                                }
-                            };
-                            state_write.current = Some(song);
-                            state_write.queue.current_index = Some(index);
-                            state_write.status = PlaybackStatus::Playing;
-                            state_write.position = 0;
-                            
-                            let new_state = state_write.clone();
-                            let _ = event_tx.send(Event::StateUpdated(new_state));
-                            CommandResult::Ok
-                        }
+        if let (Some(index), Some(track)) = (prev_index, track) {
+            match source_manager.get_stream(&track.id).await {
+                Ok(stream) => {
+                    engine.play(stream);
+                    
+                    let mut state_write = match state.write() {
+                        Ok(guard) => guard,
                         Err(e) => {
-                            eprintln!("Failed to get stream: {:?}", e);
-                            CommandResult::Error(format!("Failed to get stream: {:?}", e))
+                            eprintln!("Failed to acquire write lock: {:?}", e);
+                            return CommandResult::Error(format!("Failed to acquire write lock: {:?}", e));
                         }
-                    }
-                } else {
-                    CommandResult::Error("Source not found".to_string())
+                    };
+                    state_write.current = Some(track);
+                    state_write.queue.current_index = Some(index);
+                    state_write.status = PlaybackStatus::Playing;
+                    state_write.position = 0;
+                    
+                    let new_state = state_write.clone();
+                    let _ = event_tx.send(Event::StateUpdated(new_state));
+                    CommandResult::Ok
                 }
-            } else {
-                CommandResult::Error("Invalid song ID format".to_string())
+                Err(e) => {
+                    eprintln!("Failed to get stream: {:?}", e);
+                    CommandResult::Error(format!("Failed to get stream: {:?}", e))
+                }
             }
         } else {
             CommandResult::Error("No previous song available".to_string())
-        }
-    }
-    
-    fn parse_song_id(song_id: &str) -> Option<(String, String)> {
-        if let Some((source, id)) = song_id.split_once(':') {
-            Some((source.to_string(), id.to_string()))
-        } else {
-            None
         }
     }
 }

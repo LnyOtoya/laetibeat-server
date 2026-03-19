@@ -1,24 +1,24 @@
 use super::*;
-use music_backend_source::{MusicSource, Song, SourceError};
-use music_backend_engine::AudioInput;
+use music_backend_source::{MusicSource, Track, AudioStream, SourceError, SourceManager};
 use std::future::Future;
+use std::pin::Pin;
 
 // Mock MusicSource for testing
 #[derive(Clone)]
 struct MockSource {
-    songs: Vec<Song>,
+    tracks: Vec<Track>,
 }
 
 impl MockSource {
     fn new() -> Self {
         Self {
-            songs: vec![
-                Song {
+            tracks: vec![
+                Track {
                     id: "local:test1".to_string(),
                     title: "Test Song 1".to_string(),
                     artist: "Test Artist 1".to_string(),
-                    album: Some("Test Album 1".to_string()),
-                    duration: Some(180000), // 3 minutes
+                    album: "Test Album 1".to_string(),
+                    duration: 180000, // 3 minutes
                     source: "local".to_string(),
                 },
             ],
@@ -31,30 +31,30 @@ impl MusicSource for MockSource {
         "local"
     }
     
-    fn get_stream(&self, _song_id: &str) -> Box<dyn Future<Output = Result<AudioInput, SourceError>> + Send> {
-        // For testing, we'll return an error since we're not testing actual playback
-        Box::new(async move {
-            Err(SourceError::SongNotFound)
-        })
-    }
-    
-    fn get_metadata(&self, song_id: &str) -> Box<dyn Future<Output = Result<Song, SourceError>> + Send> {
+    fn get_track(&self, id: &str) -> Pin<Box<dyn Future<Output = Result<Track, SourceError>> + Send + '_>> {
         let self_clone = self.clone();
-        let song_id = song_id.to_string();
+        let id = id.to_string();
         
-        Box::new(async move {
-            self_clone.songs.iter()
-                .find(|song| song.id == song_id)
+        Box::pin(async move {
+            self_clone.tracks.iter()
+                .find(|track| track.id == id)
                 .cloned()
-                .ok_or(SourceError::SongNotFound)
+                .ok_or(SourceError::TrackNotFound)
         })
     }
     
-    fn get_library(&self) -> Box<dyn Future<Output = Vec<Song>> + Send> {
+    fn get_stream(&self, _id: &str) -> Pin<Box<dyn Future<Output = Result<AudioStream, SourceError>> + Send + '_>> {
+        // For testing, we'll return an error since we're not testing actual playback
+        Box::pin(async move {
+            Err(SourceError::TrackNotFound)
+        })
+    }
+    
+    fn list(&self) -> Pin<Box<dyn Future<Output = Result<Vec<Track>, SourceError>> + Send + '_>> {
         let self_clone = self.clone();
         
-        Box::new(async move {
-            self_clone.songs.clone()
+        Box::pin(async move {
+            Ok(self_clone.tracks.clone())
         })
     }
 }
@@ -64,9 +64,10 @@ async fn test_controller_load_play_pause_stop() {
     // Create mock source
     let mock_source = MockSource::new();
     let sources = vec![Box::new(mock_source) as Box<_>];
+    let source_manager = SourceManager::new(sources);
     
     // Create controller
-    let controller = Controller::new(sources);
+    let controller = Controller::new(source_manager);
     
     // Test Load
     let load_command = Command::Load { song_id: "local:test1".to_string() };

@@ -6,7 +6,7 @@ use tracing_subscriber::EnvFilter;
 use axum::Server;
 use music_backend_api::create_router;
 use music_backend_core::Controller;
-use music_backend_source::LocalSource;
+use music_backend_source::{LocalSource, SourceManager};
 
 #[tokio::main]
 async fn main() {
@@ -29,9 +29,12 @@ async fn main() {
         }
     };
     
-    // Create Controller with LocalSource
+    // Create SourceManager and add LocalSource
     let sources = vec![Box::new(local_source) as Box<_>];
-    let controller = Arc::new(Controller::new(sources));
+    let source_manager = SourceManager::new(sources);
+    
+    // Create Controller with SourceManager
+    let controller = Arc::new(Controller::new(source_manager));
     
     // Create router
     let router = create_router(controller);
