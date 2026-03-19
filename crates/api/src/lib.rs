@@ -1,6 +1,6 @@
 use axum::{Router, routing::{get, post}, Json, extract::{State, ws::{WebSocket, WebSocketUpgrade, Message}, Path}};
 use axum::http::{StatusCode, Response, header::HeaderMap};
-use axum::body::{Body, StreamBody};
+use axum::body::{Body};
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -8,6 +8,7 @@ use std::pin::Pin;
 use tokio::sync::{broadcast, Mutex};
 use tokio::io::{AsyncRead, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
+use music_backend_source::AudioStream;
 
 use music_backend_core::{Controller, Command, PlayerState, CommandResult, RepeatMode, Event};
 
@@ -1128,3 +1129,39 @@ impl<R: AsyncRead + Unpin> AsyncRead for LimitedReader<R> {
         }
     }
 }
+
+/// 将 AudioStream 转换为 axum HTTP Body 的高性能方案
+pub fn into_body(stream: AudioStream) -> Body {
+    // 将 AudioStream 转换为 AsyncRead
+    let async_read = stream.into_async_read();
+    
+    // 使用 ReaderStream 将 AsyncRead 转换为 Stream<Item = Result<Bytes, Error>>
+    let reader_stream = ReaderStream::new(async_read);
+    
+    // 使用 Body::wrap_stream 将 Stream 转换为 Body
+    Body::wrap_stream(reader_stream)
+}
+
+/*
+说明：
+
+1. ReaderStream 工作原理：
+   - ReaderStream 是 tokio-util 提供的工具，将 AsyncRead 转换为 Stream
+   - 它内部维护一个缓冲区，当缓冲区有数据时，会产生一个包含数据的 Stream 项
+   - 当读取到 EOF 时，Stream 会结束
+   - 当遇到错误时，Stream 会产生一个包含错误的 Stream 项
+
+2. 为什么适合大文件：
+   - 零拷贝优先：ReaderStream 使用缓冲区直接读取数据，避免了不必要的数据拷贝
+   - 分块传输：数据会被分成多个块进行传输，而不是一次性加载整个文件到内存
+   - backpressure 支持：当下游处理速度跟不上时，ReaderStream 会暂停读取，避免内存堆积
+   - 异步处理：使用异步 IO，不会阻塞服务器线程
+
+3. 与直接 read 的区别：
+   - 直接 read 会一次性将数据读入内存，对于大文件会占用大量内存
+   - ReaderStream 采用流式处理，内存占用恒定，与文件大小无关
+   - 直接 read 是阻塞操作，会阻塞服务器线程
+   - ReaderStream 是异步操作，不会阻塞服务器线程
+   - 直接 read 无法支持分块传输和 backpressure
+   - ReaderStream 天然支持分块传输和 backpressure
+*/
