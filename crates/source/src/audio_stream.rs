@@ -1,6 +1,6 @@
 use std::pin::Pin;
 use tokio::fs::File;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt, ReadBuf};
 
 /// 统一音频流抽象，用于表示可流式读取的音频数据
 pub enum AudioStream {
@@ -24,12 +24,69 @@ impl std::fmt::Debug for AudioStream {
     }
 }
 
+/// 定义一个同时实现 AsyncRead 和 AsyncSeek 的 trait
+pub trait AsyncReadSeek: AsyncRead + AsyncSeek + Send + Unpin {}
+
+/// 为所有实现了 AsyncRead + AsyncSeek + Send + Unpin 的类型实现 AsyncReadSeek
+impl<T: AsyncRead + AsyncSeek + Send + Unpin> AsyncReadSeek for T {}
+
 impl AudioStream {
     /// 将 AudioStream 转换为统一的 AsyncRead 接口
     pub fn into_async_read(self) -> Pin<Box<dyn AsyncRead + Send + Unpin>> {
         match self {
             AudioStream::File(file) => Box::pin(file),
             AudioStream::Stream(stream) => stream,
+        }
+    }
+    
+    /// 尝试将 AudioStream 转换为 AsyncReadSeek
+    pub fn into_async_seek(self) -> Option<Pin<Box<dyn AsyncReadSeek>>> {
+        match self {
+            AudioStream::File(file) => Some(Box::pin(file)),
+            AudioStream::Stream(_) => None,
+        }
+    }
+}
+
+/// 为 AudioStream 实现 AsyncRead trait
+impl AsyncRead for AudioStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match &mut *self {
+            AudioStream::File(file) => Pin::new(file).poll_read(cx, buf),
+            AudioStream::Stream(stream) => Pin::new(stream).poll_read(cx, buf),
+        }
+    }
+}
+
+/// 为 AudioStream 实现 AsyncSeek trait
+impl AsyncSeek for AudioStream {
+    fn start_seek(
+        mut self: Pin<&mut Self>,
+        pos: std::io::SeekFrom,
+    ) -> std::io::Result<()> {
+        match &mut *self {
+            AudioStream::File(file) => Pin::new(file).start_seek(pos),
+            AudioStream::Stream(_) => Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Stream does not support seeking",
+            )),
+        }
+    }
+    
+    fn poll_complete(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<u64>> {
+        match &mut *self {
+            AudioStream::File(file) => Pin::new(file).poll_complete(cx),
+            AudioStream::Stream(_) => std::task::Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "Stream does not support seeking",
+            ))),
         }
     }
 }

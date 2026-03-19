@@ -1,7 +1,13 @@
-use axum::{Router, routing::{get, post}, Json, extract::{State, ws::{WebSocket, WebSocketUpgrade, Message}}, http::StatusCode, response::IntoResponse};
+use axum::{Router, routing::{get, post}, Json, extract::{State, ws::{WebSocket, WebSocketUpgrade, Message}, Path}};
+use axum::http::{StatusCode, Response, header::HeaderMap};
+use axum::body::{Body, StreamBody};
+use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::pin::Pin;
 use tokio::sync::{broadcast, Mutex};
+use tokio::io::{AsyncRead, AsyncSeekExt};
+use tokio_util::io::ReaderStream;
 
 use music_backend_core::{Controller, Command, PlayerState, CommandResult, RepeatMode, Event};
 
@@ -114,6 +120,8 @@ pub fn create_router(controller: Arc<Controller>) -> Router {
         .route("/api/v2/queue/play", post(play_at_index_v2))
         .route("/api/v2/status", get(status_v2))
         .route("/api/v2/library", get(library_v2))
+        // 音频流接口
+        .route("/api/v2/stream/:id", get(stream_handler))
         // WebSocket route
         .route("/ws/status", get(ws_status))
         .with_state(app_state_arc)
@@ -945,4 +953,178 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     // Remove client from the list
     let mut clients = state.ws_clients.lock().await;
     clients.retain(|c| !c.is_closed());
+}
+
+/// 解析 Range 头部
+fn parse_range(range_header: &str, file_size: u64) -> Result<(u64, u64), StatusCode> {
+    // 检查 Range 头部格式
+    if !range_header.starts_with("bytes=") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    
+    let range_str = &range_header[6..];
+    let parts: Vec<&str> = range_str.split('-').collect();
+    
+    if parts.len() != 2 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    
+    let start = match parts[0].parse::<u64>() {
+        Ok(s) => s,
+        Err(_) => return Err(StatusCode::BAD_REQUEST),
+    };
+    
+    let end = match parts[1] {
+        "" => file_size - 1,
+        s => match s.parse::<u64>() {
+            Ok(e) => e,
+            Err(_) => return Err(StatusCode::BAD_REQUEST),
+        },
+    };
+    
+    // 验证 Range 是否有效
+    if start > end || end >= file_size {
+        return Err(StatusCode::RANGE_NOT_SATISFIABLE);
+    }
+    
+    Ok((start, end))
+}
+
+/// 处理音频流请求
+async fn stream_handler(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response<Body>, StatusCode> {
+    // 获取音频流
+    let stream_result = state.controller.get_source_manager().get_stream(&id).await;
+    let stream = match stream_result {
+        Ok(stream) => stream,
+        Err(_) => return Err(StatusCode::NOT_FOUND),
+    };
+    
+    // 尝试获取支持 seek 的流
+    if let Some(mut seekable_stream) = stream.into_async_seek() {
+        // 获取文件大小
+        let file_size = match seekable_stream.seek(std::io::SeekFrom::End(0)).await {
+            Ok(size) => size,
+            Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+        };
+        
+        // 重置到文件开头
+        if seekable_stream.seek(std::io::SeekFrom::Start(0)).await.is_err() {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        
+        // 检查是否有 Range 头部
+        if let Some(range_header) = headers.get("range") {
+            if let Ok(range_str) = range_header.to_str() {
+                match parse_range(range_str, file_size) {
+                    Ok((start, end)) => {
+                        // 定位到指定位置
+                        if seekable_stream.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+                            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                        }
+                        
+                        // 计算响应长度
+                        let length = end - start + 1;
+                        
+                        // 创建有限长度的流
+                        let limited_reader = LimitedReader::new(seekable_stream, length);
+                        let stream = ReaderStream::new(limited_reader);
+                        
+                        // 创建响应
+                        let response = Response::builder()
+                            .status(StatusCode::PARTIAL_CONTENT)
+                            .header("Accept-Ranges", "bytes")
+                            .header("Content-Length", length.to_string())
+                            .header("Content-Type", "audio/mpeg") // 简化处理，实际应该根据文件类型设置
+                            .header("Content-Range", format!("bytes {}-{}/{}", start, end, file_size))
+                            .body(Body::wrap_stream(stream))
+                            .unwrap();
+                        
+                        return Ok(response);
+                    }
+                    Err(status) => return Err(status),
+                }
+            }
+        }
+        
+        // 没有 Range 头部，返回完整文件
+        let stream = ReaderStream::new(seekable_stream);
+        
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header("Accept-Ranges", "bytes")
+            .header("Content-Length", file_size.to_string())
+            .header("Content-Type", "audio/mpeg") // 简化处理，实际应该根据文件类型设置
+            .body(Body::wrap_stream(stream))
+            .unwrap();
+        
+        Ok(response)
+    } else {
+        // 重新获取流，因为之前的流已经被移动
+        let stream = match state.controller.get_source_manager().get_stream(&id).await {
+            Ok(stream) => stream,
+            Err(_) => return Err(StatusCode::NOT_FOUND),
+        };
+        
+        // 不支持 seek 的流，直接返回完整流
+        let async_read = stream.into_async_read();
+        let stream = ReaderStream::new(async_read);
+        
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header("Content-Type", "audio/mpeg") // 简化处理，实际应该根据文件类型设置
+            .body(Body::wrap_stream(stream))
+            .unwrap();
+        
+        Ok(response)
+    }
+}
+
+/// 有限长度的读取器
+struct LimitedReader<R: AsyncRead + Unpin> {
+    reader: R,
+    remaining: u64,
+}
+
+impl<R: AsyncRead + Unpin> LimitedReader<R> {
+    fn new(reader: R, limit: u64) -> Self {
+        Self {
+            reader,
+            remaining: limit,
+        }
+    }
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for LimitedReader<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        if self.remaining == 0 {
+            return std::task::Poll::Ready(Ok(()));
+        }
+        
+        let max_capacity = std::cmp::min(buf.remaining() as u64, self.remaining) as usize;
+        
+        // 创建一个临时缓冲区
+        let mut temp_buf = vec![0; max_capacity];
+        let mut temp_read_buf = tokio::io::ReadBuf::new(&mut temp_buf);
+        
+        match Pin::new(&mut self.reader).poll_read(cx, &mut temp_read_buf) {
+            std::task::Poll::Ready(Ok(())) => {
+                let bytes_read = temp_read_buf.filled().len();
+                self.remaining -= bytes_read as u64;
+                
+                // 将读取的数据复制到原始 buf
+                buf.put_slice(temp_read_buf.filled());
+                
+                std::task::Poll::Ready(Ok(()))
+            }
+            other => other,
+        }
+    }
 }
