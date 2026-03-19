@@ -12,6 +12,7 @@ use anyhow::{Result, Context};
 // 导入新的 AudioStream 定义
 mod audio_stream;
 pub use audio_stream::AudioStream;
+pub use audio_stream::AsyncReadSeek;
 
 
 

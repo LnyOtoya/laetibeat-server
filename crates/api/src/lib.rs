@@ -1,14 +1,15 @@
 use axum::{Router, routing::{get, post}, Json, extract::{State, ws::{WebSocket, WebSocketUpgrade, Message}, Path}};
-use axum::http::{StatusCode, Response, header::HeaderMap};
+use axum::http::{StatusCode, Response, header::HeaderMap, response::Builder};
 use axum::body::{Body};
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::pin::Pin;
 use tokio::sync::{broadcast, Mutex};
-use tokio::io::{AsyncRead, AsyncSeekExt};
+use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 use music_backend_source::AudioStream;
+use music_backend_source::AsyncReadSeek;
 
 use music_backend_core::{Controller, Command, PlayerState, CommandResult, RepeatMode, Event};
 
@@ -956,40 +957,7 @@ async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     clients.retain(|c| !c.is_closed());
 }
 
-/// 解析 Range 头部
-fn parse_range(range_header: &str, file_size: u64) -> Result<(u64, u64), StatusCode> {
-    // 检查 Range 头部格式
-    if !range_header.starts_with("bytes=") {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    
-    let range_str = &range_header[6..];
-    let parts: Vec<&str> = range_str.split('-').collect();
-    
-    if parts.len() != 2 {
-        return Err(StatusCode::BAD_REQUEST);
-    }
-    
-    let start = match parts[0].parse::<u64>() {
-        Ok(s) => s,
-        Err(_) => return Err(StatusCode::BAD_REQUEST),
-    };
-    
-    let end = match parts[1] {
-        "" => file_size - 1,
-        s => match s.parse::<u64>() {
-            Ok(e) => e,
-            Err(_) => return Err(StatusCode::BAD_REQUEST),
-        },
-    };
-    
-    // 验证 Range 是否有效
-    if start > end || end >= file_size {
-        return Err(StatusCode::RANGE_NOT_SATISFIABLE);
-    }
-    
-    Ok((start, end))
-}
+
 
 /// 处理音频流请求
 async fn stream_handler(
@@ -997,9 +965,17 @@ async fn stream_handler(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response<Body>, StatusCode> {
+    // 获取 Track 信息，用于获取 MIME 类型
+    let track = match state.controller.get_source_manager().get_track(&id).await {
+        Ok(track) => track,
+        Err(_) => return Err(StatusCode::NOT_FOUND),
+    };
+    
+    // 获取 MIME 类型
+    let content_type = get_mime_type(&track);
+    
     // 获取音频流
-    let stream_result = state.controller.get_source_manager().get_stream(&id).await;
-    let stream = match stream_result {
+    let stream = match state.controller.get_source_manager().get_stream(&id).await {
         Ok(stream) => stream,
         Err(_) => return Err(StatusCode::NOT_FOUND),
     };
@@ -1020,31 +996,16 @@ async fn stream_handler(
         // 检查是否有 Range 头部
         if let Some(range_header) = headers.get("range") {
             if let Ok(range_str) = range_header.to_str() {
-                match parse_range(range_str, file_size) {
+                match parse_range_header(range_str, file_size) {
                     Ok((start, end)) => {
-                        // 定位到指定位置
-                        if seekable_stream.seek(std::io::SeekFrom::Start(start)).await.is_err() {
-                            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                        }
-                        
-                        // 计算响应长度
-                        let length = end - start + 1;
-                        
-                        // 创建有限长度的流
-                        let limited_reader = LimitedReader::new(seekable_stream, length);
-                        let stream = ReaderStream::new(limited_reader);
-                        
-                        // 创建响应
-                        let response = Response::builder()
-                            .status(StatusCode::PARTIAL_CONTENT)
-                            .header("Accept-Ranges", "bytes")
-                            .header("Content-Length", length.to_string())
-                            .header("Content-Type", "audio/mpeg") // 简化处理，实际应该根据文件类型设置
-                            .header("Content-Range", format!("bytes {}-{}/{}", start, end, file_size))
-                            .body(Body::wrap_stream(stream))
-                            .unwrap();
-                        
-                        return Ok(response);
+                        // 处理 Range 请求
+                        return handle_range_request(
+                            seekable_stream,
+                            file_size,
+                            content_type,
+                            start,
+                            end,
+                        ).await;
                     }
                     Err(status) => return Err(status),
                 }
@@ -1052,17 +1013,7 @@ async fn stream_handler(
         }
         
         // 没有 Range 头部，返回完整文件
-        let stream = ReaderStream::new(seekable_stream);
-        
-        let response = Response::builder()
-            .status(StatusCode::OK)
-            .header("Accept-Ranges", "bytes")
-            .header("Content-Length", file_size.to_string())
-            .header("Content-Type", "audio/mpeg") // 简化处理，实际应该根据文件类型设置
-            .body(Body::wrap_stream(stream))
-            .unwrap();
-        
-        Ok(response)
+        Ok(handle_full_content(seekable_stream, file_size, content_type).await)
     } else {
         // 重新获取流，因为之前的流已经被移动
         let stream = match state.controller.get_source_manager().get_stream(&id).await {
@@ -1076,13 +1027,15 @@ async fn stream_handler(
         
         let response = Response::builder()
             .status(StatusCode::OK)
-            .header("Content-Type", "audio/mpeg") // 简化处理，实际应该根据文件类型设置
+            .header("Content-Type", content_type)
             .body(Body::wrap_stream(stream))
             .unwrap();
         
         Ok(response)
     }
 }
+
+
 
 /// 有限长度的读取器
 struct LimitedReader<R: AsyncRead + Unpin> {
@@ -1128,6 +1081,143 @@ impl<R: AsyncRead + Unpin> AsyncRead for LimitedReader<R> {
             other => other,
         }
     }
+}
+
+/// 根据 Track 获取 MIME 类型
+pub fn get_mime_type(track: &music_backend_source::Track) -> &'static str {
+    // 从 track.id 中提取文件扩展名
+    if let Some((_, path_str)) = track.id.split_once(':') {
+        if let Some(extension) = std::path::Path::new(path_str).extension() {
+            if let Some(ext_str) = extension.to_str() {
+                match ext_str.to_lowercase().as_str() {
+                    "mp3" => "audio/mpeg",
+                    "flac" => "audio/flac",
+                    "m4a" => "audio/mp4",
+                    "ogg" => "audio/ogg",
+                    "wav" => "audio/wav",
+                    _ => "application/octet-stream",
+                }
+            } else {
+                "application/octet-stream"
+            }
+        } else {
+            "application/octet-stream"
+        }
+    } else {
+        "application/octet-stream"
+    }
+}
+
+/// 解析 Range 头部
+fn parse_range_header(range_header: &str, file_size: u64) -> Result<(u64, u64), StatusCode> {
+    // 检查 Range 头部格式
+    if !range_header.starts_with("bytes=") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    
+    let range_str = &range_header[6..];
+    let parts: Vec<&str> = range_str.split('-').collect();
+    
+    if parts.len() != 2 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    
+    let start = match parts[0].parse::<u64>() {
+        Ok(s) => s,
+        Err(_) => return Err(StatusCode::BAD_REQUEST),
+    };
+    
+    let end = match parts[1] {
+        "" => file_size - 1,
+        s => match s.parse::<u64>() {
+            Ok(e) => e,
+            Err(_) => return Err(StatusCode::BAD_REQUEST),
+        },
+    };
+    
+    // 验证 Range 是否有效
+    if start >= file_size || start > end {
+        return Err(StatusCode::RANGE_NOT_SATISFIABLE);
+    }
+    
+    Ok((start, end))
+}
+
+/// 构建响应头
+fn build_headers(
+    status: StatusCode,
+    content_type: &str,
+    content_length: u64,
+    file_size: Option<u64>,
+    range: Option<(u64, u64)>,
+) -> Builder {
+    let mut builder = Builder::new()
+        .status(status)
+        .header("Accept-Ranges", "bytes")
+        .header("Content-Length", content_length.to_string())
+        .header("Content-Type", content_type);
+    
+    // 如果是 Range 请求，添加 Content-Range 头部
+    if let (Some((start, end)), Some(total)) = (range, file_size) {
+        builder = builder.header("Content-Range", format!("bytes {}-{}/{}", start, end, total));
+    }
+    
+    builder
+}
+
+/// 处理无 Range 请求
+async fn handle_full_content(
+    seekable_stream: Pin<Box<dyn AsyncReadSeek>>,
+    file_size: u64,
+    content_type: &str,
+) -> Response<Body> {
+    let stream = ReaderStream::new(seekable_stream);
+    
+    let response = build_headers(
+        StatusCode::OK,
+        content_type,
+        file_size,
+        None,
+        None,
+    )
+    .body(Body::wrap_stream(stream))
+    .unwrap();
+    
+    response
+}
+
+/// 处理 Range 请求
+async fn handle_range_request(
+    mut seekable_stream: Pin<Box<dyn AsyncReadSeek>>,
+    file_size: u64,
+    content_type: &str,
+    start: u64,
+    end: u64,
+) -> Result<Response<Body>, StatusCode> {
+    // 定位到指定位置
+    if seekable_stream.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    
+    // 计算响应长度
+    let length = end - start + 1;
+    
+    // 创建有限长度的流
+    let limited_reader = LimitedReader::new(seekable_stream, length);
+    let stream = ReaderStream::new(limited_reader);
+    
+    // 创建响应
+    let response = build_headers(
+        StatusCode::PARTIAL_CONTENT,
+        content_type,
+        length,
+        Some(file_size),
+        Some((start, end)),
+    )
+    .body(Body::wrap_stream(stream))
+    .unwrap();
+    
+    Ok(response)
 }
 
 /// 将 AudioStream 转换为 axum HTTP Body 的高性能方案
