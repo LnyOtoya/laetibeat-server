@@ -5,23 +5,15 @@ use std::sync::Arc;
 use tokio::io::AsyncRead;
 use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
-use thiserror::Error;
 use lofty::{AudioFile, TaggedFile, TaggedFileExt, LoftyError, Accessor, ParseOptions};
 use async_trait::async_trait;
+use anyhow::{Result, Context};
 
 // 导入新的 AudioStream 定义
 mod audio_stream;
 pub use audio_stream::AudioStream;
 
-#[derive(Error, Debug)]
-pub enum SourceError {
-    #[error("IO error: {0}")]
-    IoError(#[from] std::io::Error),
-    #[error("Metadata error: {0}")]
-    MetadataError(#[from] LoftyError),
-    #[error("Track not found")]
-    TrackNotFound,
-}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Track {
@@ -38,10 +30,10 @@ use std::pin::Pin;
 #[async_trait]
 pub trait MusicSource: Send + Sync {
     fn name(&self) -> &str;
-    async fn get_track(&self, id: &str) -> Result<Track, SourceError>;
-    async fn get_stream(&self, id: &str) -> Result<AudioStream, SourceError>;
-    async fn list(&self) -> Result<Vec<Track>, SourceError>;
-    async fn search(&self, keyword: &str) -> Result<Vec<Track>, SourceError> {
+    async fn list(&self) -> Result<Vec<Track>>;
+    async fn get_track(&self, id: &str) -> Result<Track>;
+    async fn get_stream(&self, id: &str) -> Result<AudioStream>;
+    async fn search(&self, keyword: &str) -> Result<Vec<Track>> {
         // 默认实现：返回空列表
         Ok(Vec::new())
     }
@@ -54,7 +46,7 @@ pub struct LocalSource {
 }
 
 impl LocalSource {
-    pub async fn new() -> Result<Self, SourceError> {
+    pub async fn new() -> Result<Self> {
         let music_dir = PathBuf::from(r"C:\Users\otoya\Music");
         let library = Arc::new(RwLock::new(HashMap::new()));
         
@@ -68,7 +60,7 @@ impl LocalSource {
         Ok(local_source)
     }
     
-    async fn scan_directory(&mut self) -> Result<(), SourceError> {
+    async fn scan_directory(&mut self) -> Result<()> {
         let mut library_write = self.library.write().await;
         library_write.clear();
         
@@ -77,10 +69,10 @@ impl LocalSource {
         Ok(())
     }
     
-    fn scan_recursive(&self, dir: &Path, library: &mut HashMap<String, Track>) -> Result<(), SourceError> {
+    fn scan_recursive(&self, dir: &Path, library: &mut HashMap<String, Track>) -> Result<()> {
         if dir.is_dir() {
-            for entry in read_dir(dir)? {
-                let entry = entry?;
+            for entry in read_dir(dir).context("Failed to read directory")? {
+                let entry = entry.context("Failed to read directory entry")?;
                 let path = entry.path();
                 
                 if path.is_dir() {
@@ -125,9 +117,10 @@ impl LocalSource {
         library_read.get(track_id).cloned()
     }
     
-    fn parse_metadata(&self, path: &Path) -> Result<Track, SourceError> {
-        let mut file = File::open(path)?;
-        let tagged_file = TaggedFile::read_from(&mut file, ParseOptions::default())?;
+    fn parse_metadata(&self, path: &Path) -> Result<Track> {
+        let mut file = File::open(path).context("Failed to open audio file")?;
+        let tagged_file = TaggedFile::read_from(&mut file, ParseOptions::default())
+            .context("Failed to parse audio metadata")?;
         
         let mut title = String::new();
         let mut artist = String::new();
@@ -208,35 +201,36 @@ impl MusicSource for LocalSource {
         "local"
     }
     
-    async fn get_track(&self, id: &str) -> Result<Track, SourceError> {
-        if let Some(track) = self.get_track_from_cache(id).await {
-            Ok(track)
-        } else {
-            Err(SourceError::TrackNotFound)
-        }
-    }
-    
-    async fn get_stream(&self, id: &str) -> Result<AudioStream, SourceError> {
-        if let Some(track) = self.get_track_from_cache(id).await {
-            // 从 track.id 中提取路径
-            if let Some((_, path_str)) = track.id.split_once(':') {
-                let path = PathBuf::from(path_str);
-                let file = tokio::fs::File::open(path).await?;
-                Ok(AudioStream::File(file))
-            } else {
-                Err(SourceError::TrackNotFound)
-            }
-        } else {
-            Err(SourceError::TrackNotFound)
-        }
-    }
-    
-    async fn list(&self) -> Result<Vec<Track>, SourceError> {
+    async fn list(&self) -> Result<Vec<Track>> {
         let library_read = self.library.read().await;
         Ok(library_read.values().cloned().collect())
     }
     
-    async fn search(&self, keyword: &str) -> Result<Vec<Track>, SourceError> {
+    async fn get_track(&self, id: &str) -> Result<Track> {
+        if let Some(track) = self.get_track_from_cache(id).await {
+            Ok(track)
+        } else {
+            anyhow::bail!("Track not found")
+        }
+    }
+    
+    async fn get_stream(&self, id: &str) -> Result<AudioStream> {
+        if let Some(track) = self.get_track_from_cache(id).await {
+            // 从 track.id 中提取路径
+            if let Some((_, path_str)) = track.id.split_once(':') {
+                let path = PathBuf::from(path_str);
+                let file = tokio::fs::File::open(path).await
+                    .context("Failed to open audio file")?;
+                Ok(AudioStream::File(file))
+            } else {
+                anyhow::bail!("Invalid track ID format")
+            }
+        } else {
+            anyhow::bail!("Track not found")
+        }
+    }
+    
+    async fn search(&self, keyword: &str) -> Result<Vec<Track>> {
         let library_read = self.library.read().await;
         let mut tracks = Vec::new();
         let keyword_lower = keyword.to_lowercase();
@@ -270,33 +264,33 @@ impl SourceManager {
         }
     }
     
-    pub async fn get_track(&self, id: &str) -> Result<Track, SourceError> {
+    pub async fn get_track(&self, id: &str) -> Result<Track> {
         if let Some((source_name, _)) = self.parse_track_id(id) {
             let sources_read = self.sources.read().await;
             if let Some(source) = sources_read.get(&source_name) {
                 source.get_track(id).await
             } else {
-                Err(SourceError::TrackNotFound)
+                anyhow::bail!("Source not found")
             }
         } else {
-            Err(SourceError::TrackNotFound)
+            anyhow::bail!("Invalid track ID format")
         }
     }
     
-    pub async fn get_stream(&self, id: &str) -> Result<AudioStream, SourceError> {
+    pub async fn get_stream(&self, id: &str) -> Result<AudioStream> {
         if let Some((source_name, _)) = self.parse_track_id(id) {
             let sources_read = self.sources.read().await;
             if let Some(source) = sources_read.get(&source_name) {
                 source.get_stream(id).await
             } else {
-                Err(SourceError::TrackNotFound)
+                anyhow::bail!("Source not found")
             }
         } else {
-            Err(SourceError::TrackNotFound)
+            anyhow::bail!("Invalid track ID format")
         }
     }
     
-    pub async fn list(&self) -> Result<Vec<Track>, SourceError> {
+    pub async fn list(&self) -> Result<Vec<Track>> {
         let sources_read = self.sources.read().await;
         let mut all_tracks = Vec::new();
         for source in sources_read.values() {
@@ -307,7 +301,7 @@ impl SourceManager {
         Ok(all_tracks)
     }
     
-    pub async fn search(&self, keyword: &str) -> Result<Vec<Track>, SourceError> {
+    pub async fn search(&self, keyword: &str) -> Result<Vec<Track>> {
         let sources_read = self.sources.read().await;
         let mut all_tracks = Vec::new();
         for source in sources_read.values() {
@@ -338,3 +332,50 @@ impl SourceManager {
         }
     }
 }
+
+/// 示例调用
+#[cfg(test)]
+async fn example_usage() -> Result<()> {
+    // 创建 LocalSource
+    let local_source = LocalSource::new().await?;
+    
+    // 创建 SourceManager
+    let sources = vec![Arc::new(local_source) as Arc<_>];
+    let source_manager = SourceManager::new(sources);
+    
+    // 列出所有歌曲
+    let tracks = source_manager.list().await?;
+    println!("Found {} tracks", tracks.len());
+    
+    // 获取第一首歌曲的流
+    if let Some(first_track) = tracks.first() {
+        println!("Playing: {} - {}", first_track.artist, first_track.title);
+        let stream = source_manager.get_stream(&first_track.id).await?;
+        
+        // 将 AudioStream 转换为 AsyncRead
+        let mut async_read = stream.into_async_read();
+        
+        // 读取一些数据（实际应用中可能会流式传输给客户端）
+        let mut buffer = [0; 1024];
+        let bytes_read = async_read.read(&mut buffer).await?;
+        println!("Read {} bytes from stream", bytes_read);
+    }
+    
+    Ok(())
+}
+
+/*
+设计说明：
+
+1. 为什么 stream 在 source 层生成：
+   - 封装性：每个音源知道如何最佳地获取和处理自己的音频流
+   - 一致性：所有音源提供统一的 AudioStream 接口，调用方无需关心具体实现
+   - 灵活性：不同音源可以有不同的流处理逻辑（如本地文件、HTTP 流、云存储等）
+   - 错误处理：音源可以在流生成时处理特定的错误情况
+
+2. 为什么不在 HTTP 层处理文件：
+   - 职责分离：HTTP 层负责处理网络请求，音源层负责数据获取和处理
+   - 可重用性：AudioStream 可以在非 HTTP 场景中使用（如本地播放）
+   - 统一接口：无论数据来源如何，都通过同一接口处理
+   - 性能优化：音源可以根据自身特点优化流处理（如缓存、压缩等）
+*/

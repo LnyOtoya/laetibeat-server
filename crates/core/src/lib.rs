@@ -19,7 +19,7 @@ impl<T> VecExt for Vec<T> {
 }
 
 use music_backend_engine::{Engine, EngineEvent};
-use music_backend_source::{Track, SourceManager, SourceError};
+use music_backend_source::{Track, SourceManager};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum RepeatMode {
@@ -112,8 +112,6 @@ pub enum ControllerError {
     InvalidSongId,
     #[error("Source not found for song ID")]
     SourceNotFound,
-    #[error("Error from source: {0}")]
-    SourceError(#[from] SourceError),
     #[error("Queue is empty")]
     QueueEmpty,
     #[error("Index out of bounds")]
