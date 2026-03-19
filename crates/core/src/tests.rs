@@ -1,7 +1,7 @@
 use super::*;
 use music_backend_source::{MusicSource, Track, AudioStream, SourceError, SourceManager};
-use std::future::Future;
-use std::pin::Pin;
+use std::sync::Arc;
+use async_trait::async_trait;
 
 // Mock MusicSource for testing
 #[derive(Clone)]
@@ -26,36 +26,26 @@ impl MockSource {
     }
 }
 
+#[async_trait]
 impl MusicSource for MockSource {
     fn name(&self) -> &str {
         "local"
     }
     
-    fn get_track(&self, id: &str) -> Pin<Box<dyn Future<Output = Result<Track, SourceError>> + Send + '_>> {
-        let self_clone = self.clone();
-        let id = id.to_string();
-        
-        Box::pin(async move {
-            self_clone.tracks.iter()
-                .find(|track| track.id == id)
-                .cloned()
-                .ok_or(SourceError::TrackNotFound)
-        })
+    async fn get_track(&self, id: &str) -> Result<Track, SourceError> {
+        self.tracks.iter()
+            .find(|track| track.id == id)
+            .cloned()
+            .ok_or(SourceError::TrackNotFound)
     }
     
-    fn get_stream(&self, _id: &str) -> Pin<Box<dyn Future<Output = Result<AudioStream, SourceError>> + Send + '_>> {
+    async fn get_stream(&self, _id: &str) -> Result<AudioStream, SourceError> {
         // For testing, we'll return an error since we're not testing actual playback
-        Box::pin(async move {
-            Err(SourceError::TrackNotFound)
-        })
+        Err(SourceError::TrackNotFound)
     }
     
-    fn list(&self) -> Pin<Box<dyn Future<Output = Result<Vec<Track>, SourceError>> + Send + '_>> {
-        let self_clone = self.clone();
-        
-        Box::pin(async move {
-            Ok(self_clone.tracks.clone())
-        })
+    async fn list(&self) -> Result<Vec<Track>, SourceError> {
+        Ok(self.tracks.clone())
     }
 }
 
@@ -63,7 +53,7 @@ impl MusicSource for MockSource {
 async fn test_controller_load_play_pause_stop() {
     // Create mock source
     let mock_source = MockSource::new();
-    let sources = vec![Box::new(mock_source) as Box<_>];
+    let sources = vec![Arc::new(mock_source) as Arc<_>];
     let source_manager = SourceManager::new(sources);
     
     // Create controller

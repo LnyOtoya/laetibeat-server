@@ -1,14 +1,14 @@
 use std::collections::HashMap;
 use std::fs::{File, read_dir};
-use std::io::{BufReader, Read};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::future::Future;
-use std::pin::Pin;
+use tokio::io::AsyncRead;
 use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use lofty::{AudioFile, TaggedFile, TaggedFileExt, LoftyError, Accessor, ParseOptions};
+use async_trait::async_trait;
 
 #[derive(Error, Debug)]
 pub enum SourceError {
@@ -33,37 +33,39 @@ pub struct Track {
 // 音频流抽象
 pub enum AudioStream {
     File(PathBuf),                                 // 本地文件路径
-    Stream(Pin<Box<dyn Read + Send + Unpin>>),     // 通用流
+    Stream(Pin<Box<dyn AsyncRead + Send + Unpin>>), // 异步流
     Bytes(Vec<u8>),                                // 内存中的字节
 }
 
 impl std::fmt::Debug for AudioStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AudioStream::File(path) => write!(f, "AudioStream::File({:?})", path),
-            AudioStream::Stream(_) => write!(f, "AudioStream::Stream(<stream>)",),
-            AudioStream::Bytes(bytes) => write!(f, "AudioStream::Bytes({} bytes)", bytes.len()),
+            AudioStream::File(path) => write!(f, "AudioStream::File({:?})", path)?,
+            AudioStream::Stream(_) => write!(f, "AudioStream::Stream(<stream>)")?,
+            AudioStream::Bytes(bytes) => write!(f, "AudioStream::Bytes({} bytes)", bytes.len())?
         }
+        Ok(())
     }
 }
 
+use std::pin::Pin;
+
+#[async_trait]
 pub trait MusicSource: Send + Sync {
     fn name(&self) -> &str;
-    fn get_track(&self, id: &str) -> Pin<Box<dyn Future<Output = Result<Track, SourceError>> + Send + '_>>;
-    fn get_stream(&self, id: &str) -> Pin<Box<dyn Future<Output = Result<AudioStream, SourceError>> + Send + '_>>;
-    fn list(&self) -> Pin<Box<dyn Future<Output = Result<Vec<Track>, SourceError>> + Send + '_>>;
-    fn search(&self, keyword: &str) -> Pin<Box<dyn Future<Output = Result<Vec<Track>, SourceError>> + Send + '_>> {
+    async fn get_track(&self, id: &str) -> Result<Track, SourceError>;
+    async fn get_stream(&self, id: &str) -> Result<AudioStream, SourceError>;
+    async fn list(&self) -> Result<Vec<Track>, SourceError>;
+    async fn search(&self, keyword: &str) -> Result<Vec<Track>, SourceError> {
         // 默认实现：返回空列表
-        Box::pin(async move {
-            Ok(Vec::new())
-        })
+        Ok(Vec::new())
     }
 }
 
 #[derive(Clone)]
 pub struct LocalSource {
     music_dir: PathBuf,
-    library: Arc<RwLock<HashMap<String, PathBuf>>>, // track_id -> file path
+    library: Arc<RwLock<HashMap<String, Track>>>, // track_id -> Track
 }
 
 impl LocalSource {
@@ -90,17 +92,24 @@ impl LocalSource {
         Ok(())
     }
     
-    fn scan_recursive(&self, dir: &Path, library: &mut HashMap<String, PathBuf>) -> Result<(), SourceError> {
+    fn scan_recursive(&self, dir: &Path, library: &mut HashMap<String, Track>) -> Result<(), SourceError> {
         if dir.is_dir() {
             for entry in read_dir(dir)? {
                 let entry = entry?;
                 let path = entry.path();
                 
                 if path.is_dir() {
-                    self.scan_recursive(&path, library)?;
+                    if let Err(e) = self.scan_recursive(&path, library) {
+                        eprintln!("Error scanning directory {:?}: {:?}", path, e);
+                        // 继续扫描其他目录，不中断
+                    }
                 } else if self.is_audio_file(&path) {
-                    let track_id = self.generate_track_id(&path);
-                    library.insert(track_id, path);
+                    if let Ok(track) = self.parse_metadata(&path) {
+                        library.insert(track.id.clone(), track);
+                    } else {
+                        eprintln!("Error parsing metadata for {:?}", path);
+                        // 跳过错误文件，继续扫描
+                    }
                 }
             }
         }
@@ -126,7 +135,7 @@ impl LocalSource {
         }
     }
     
-    async fn get_file_path(&self, track_id: &str) -> Option<PathBuf> {
+    async fn get_track_from_cache(&self, track_id: &str) -> Option<Track> {
         let library_read = self.library.read().await;
         library_read.get(track_id).cloned()
     }
@@ -208,98 +217,77 @@ impl LocalSource {
     }
 }
 
+#[async_trait]
 impl MusicSource for LocalSource {
     fn name(&self) -> &str {
         "local"
     }
     
-    fn get_track(&self, id: &str) -> Pin<Box<dyn Future<Output = Result<Track, SourceError>> + Send + '_>> {
-        let self_clone = self.clone();
-        let id = id.to_string();
-        
-        Box::pin(async move {
-            if let Some(path) = self_clone.get_file_path(&id).await {
-                self_clone.parse_metadata(&path)
-            } else {
-                Err(SourceError::TrackNotFound)
-            }
-        })
+    async fn get_track(&self, id: &str) -> Result<Track, SourceError> {
+        if let Some(track) = self.get_track_from_cache(id).await {
+            Ok(track)
+        } else {
+            Err(SourceError::TrackNotFound)
+        }
     }
     
-    fn get_stream(&self, id: &str) -> Pin<Box<dyn Future<Output = Result<AudioStream, SourceError>> + Send + '_>> {
-        let self_clone = self.clone();
-        let id = id.to_string();
-        
-        Box::pin(async move {
-            if let Some(path) = self_clone.get_file_path(&id).await {
+    async fn get_stream(&self, id: &str) -> Result<AudioStream, SourceError> {
+        if let Some(track) = self.get_track_from_cache(id).await {
+            // 从 track.id 中提取路径
+            if let Some((_, path_str)) = track.id.split_once(':') {
+                let path = PathBuf::from(path_str);
                 Ok(AudioStream::File(path))
             } else {
                 Err(SourceError::TrackNotFound)
             }
-        })
+        } else {
+            Err(SourceError::TrackNotFound)
+        }
     }
     
-    fn list(&self) -> Pin<Box<dyn Future<Output = Result<Vec<Track>, SourceError>> + Send + '_>> {
-        let self_clone = self.clone();
-        
-        Box::pin(async move {
-            let library_read = self_clone.library.read().await;
-            let mut tracks = Vec::new();
-            
-            for path in library_read.values() {
-                if let Ok(track) = self_clone.parse_metadata(path) {
-                    tracks.push(track);
-                }
-            }
-            
-            Ok(tracks)
-        })
+    async fn list(&self) -> Result<Vec<Track>, SourceError> {
+        let library_read = self.library.read().await;
+        Ok(library_read.values().cloned().collect())
     }
     
-    fn search(&self, keyword: &str) -> Pin<Box<dyn Future<Output = Result<Vec<Track>, SourceError>> + Send + '_>> {
-        let self_clone = self.clone();
-        let keyword = keyword.to_string();
+    async fn search(&self, keyword: &str) -> Result<Vec<Track>, SourceError> {
+        let library_read = self.library.read().await;
+        let mut tracks = Vec::new();
+        let keyword_lower = keyword.to_lowercase();
         
-        Box::pin(async move {
-            let library_read = self_clone.library.read().await;
-            let mut tracks = Vec::new();
-            let keyword_lower = keyword.to_lowercase();
-            
-            for path in library_read.values() {
-                if let Ok(track) = self_clone.parse_metadata(path) {
-                    if track.title.to_lowercase().contains(&keyword_lower) ||
-                       track.artist.to_lowercase().contains(&keyword_lower) ||
-                       track.album.to_lowercase().contains(&keyword_lower) {
-                        tracks.push(track);
-                    }
-                }
+        for track in library_read.values() {
+            if track.title.to_lowercase().contains(&keyword_lower) ||
+               track.artist.to_lowercase().contains(&keyword_lower) ||
+               track.album.to_lowercase().contains(&keyword_lower) {
+                tracks.push(track.clone());
             }
-            
-            Ok(tracks)
-        })
+        }
+        
+        Ok(tracks)
     }
 }
 
 // SourceManager 实现
 #[derive(Clone)]
 pub struct SourceManager {
-    sources: Arc<HashMap<String, Box<dyn MusicSource>>>,
+    sources: Arc<RwLock<HashMap<String, Arc<dyn MusicSource>>>>,
 }
 
 impl SourceManager {
-    pub fn new(sources: Vec<Box<dyn MusicSource>>) -> Self {
+    pub fn new(sources: Vec<Arc<dyn MusicSource>>) -> Self {
         let mut source_map = HashMap::new();
         for source in sources {
             source_map.insert(source.name().to_string(), source);
         }
         Self {
-            sources: Arc::new(source_map),
+            sources: Arc::new(RwLock::new(source_map)),
         }
     }
     
     pub async fn get_track(&self, id: &str) -> Result<Track, SourceError> {
         if let Some((source_name, _)) = self.parse_track_id(id) {
-            if let Some(source) = self.sources.get(&source_name) {
+            let sources_read = self.sources.read().await;
+            if let Some(source) = sources_read.get(&source_name) {
                 source.get_track(id).await
             } else {
                 Err(SourceError::TrackNotFound)
@@ -311,7 +299,8 @@ impl SourceManager {
     
     pub async fn get_stream(&self, id: &str) -> Result<AudioStream, SourceError> {
         if let Some((source_name, _)) = self.parse_track_id(id) {
-            if let Some(source) = self.sources.get(&source_name) {
+            let sources_read = self.sources.read().await;
+            if let Some(source) = sources_read.get(&source_name) {
                 source.get_stream(id).await
             } else {
                 Err(SourceError::TrackNotFound)
@@ -322,21 +311,37 @@ impl SourceManager {
     }
     
     pub async fn list(&self) -> Result<Vec<Track>, SourceError> {
+        let sources_read = self.sources.read().await;
         let mut all_tracks = Vec::new();
-        for source in self.sources.values() {
-            let tracks = source.list().await?;
-            all_tracks.extend(tracks);
+        for source in sources_read.values() {
+            if let Ok(tracks) = source.list().await {
+                all_tracks.extend(tracks);
+            }
         }
         Ok(all_tracks)
     }
     
     pub async fn search(&self, keyword: &str) -> Result<Vec<Track>, SourceError> {
+        let sources_read = self.sources.read().await;
         let mut all_tracks = Vec::new();
-        for source in self.sources.values() {
-            let tracks = source.search(keyword).await?;
-            all_tracks.extend(tracks);
+        for source in sources_read.values() {
+            if let Ok(tracks) = source.search(keyword).await {
+                all_tracks.extend(tracks);
+            }
         }
         Ok(all_tracks)
+    }
+    
+    // 动态注册音源
+    pub async fn register_source(&self, source: Arc<dyn MusicSource>) {
+        let mut sources_write = self.sources.write().await;
+        sources_write.insert(source.name().to_string(), source);
+    }
+    
+    // 移除音源
+    pub async fn remove_source(&self, source_name: &str) {
+        let mut sources_write = self.sources.write().await;
+        sources_write.remove(source_name);
     }
     
     fn parse_track_id(&self, id: &str) -> Option<(String, String)> {

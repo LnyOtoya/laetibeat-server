@@ -30,7 +30,7 @@ async fn main() {
     };
     
     // Create SourceManager and add LocalSource
-    let sources = vec![Box::new(local_source) as Box<_>];
+    let sources = vec![Arc::new(local_source) as Arc<_>];
     let source_manager = SourceManager::new(sources);
     
     // Create Controller with SourceManager

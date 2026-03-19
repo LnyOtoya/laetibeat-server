@@ -2,7 +2,7 @@ use rodio::{Decoder, OutputStream, Sink, Source};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::sync::{Arc, Mutex};
-use std::pin::Pin;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::mpsc;
 
 // 从 source 模块导入 AudioStream
@@ -66,10 +66,23 @@ impl Engine {
                 let source = Decoder::new(reader).unwrap();
                 sink.append(source);
             }
-            AudioStream::Stream(stream) => {
-                // 对于 Stream 类型，我们需要确保它实现了 Seek 和 Sync
-                // 这里简化处理，只支持 File 类型
-                eprintln!("Stream type not supported yet");
+            AudioStream::Stream(mut stream) => {
+                // 对于 Stream 类型，我们需要将 AsyncRead 转换为同步 Read
+                // 这里使用一个简单的方法：读取所有数据到内存中
+                let mut buffer = Vec::new();
+                // 注意：这里在同步上下文中使用了阻塞的方式读取异步流
+                // 在实际生产环境中，应该使用更优雅的方式处理
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        stream.read_to_end(&mut buffer).await.unwrap();
+                    });
+                
+                use std::io::Cursor;
+                let cursor = Cursor::new(buffer);
+                let source = Decoder::new(cursor).unwrap();
+                sink.append(source);
             }
             AudioStream::Bytes(bytes) => {
                 use std::io::Cursor;
