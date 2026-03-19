@@ -10,5 +10,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio-tungstenite = "0.18"
 tokio-util = { version = "0.7", features = ["io"] }
+axum_cors = "0.1.7"
 music_backend_core = { path = "../core" }
 music_backend_source = { path = "../source" }

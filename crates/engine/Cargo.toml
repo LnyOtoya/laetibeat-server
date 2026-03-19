@@ -4,6 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rodio = "0.18"
-tokio = { version = "1.0", features = ["time", "sync", "io-util"] }
+tokio = { version = "1.0", features = ["sync"] }
 music_backend_source = { path = "../source" }

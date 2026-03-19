@@ -186,101 +186,9 @@ impl Controller {
         let source_manager = self.source_manager.clone();
         
         tokio::spawn(async move {
-            let mut engine = Engine::new();
+            let _engine = Engine::new();
             
-            // Create channel for engine events
-            let (engine_event_tx, mut engine_event_rx) = mpsc::channel(10);
-            engine.set_event_sender(engine_event_tx);
-            
-            // Spawn task to handle engine events
-            let state_clone = state.clone();
-            let event_tx_clone = event_tx.clone();
-            let source_manager_clone = source_manager.clone();
-            let mut engine_clone = engine.clone();
-            
-            tokio::spawn(async move {
-                while let Some(event) = engine_event_rx.recv().await {
-                    if let EngineEvent::PlaybackEnded = event {
-                        // Handle playback ended event
-                        let mut repeat_mode = RepeatMode::Off;
-                        let mut current_index = None;
-                        {
-                            let state_read = match state_clone.read() {
-                                Ok(guard) => guard,
-                                Err(e) => {
-                                    eprintln!("Failed to acquire read lock: {:?}", e);
-                                    continue;
-                                }
-                            };
-                            current_index = state_read.queue.current_index;
-                            repeat_mode = state_read.queue.repeat.clone();
-                        }
-                        
-                        match repeat_mode {
-                            RepeatMode::One => {
-                                // Repeat current song
-                                if let Some(index) = current_index {
-                                    let mut song_id = None;
-                                    {
-                                        match state_clone.read() {
-                                            Ok(guard) => {
-                                                if index < guard.queue.tracks.len() {
-                                                    song_id = Some(guard.queue.tracks[index].id.clone());
-                                                }
-                                            },
-                                            Err(e) => {
-                                                eprintln!("Failed to acquire read lock: {:?}", e);
-                                            }
-                                        }
-                                    }
-                                    
-                                    if let Some(song_id) = song_id {
-                                        match source_manager_clone.get_stream(&song_id).await {
-                                            Ok(stream) => {
-                                                engine_clone.play(stream);
-                                                
-                                                match state_clone.write() {
-                                                    Ok(mut state_write) => {
-                                                        state_write.status = PlaybackStatus::Playing;
-                                                        state_write.position = 0;
-                                                        
-                                                        let new_state = state_write.clone();
-                                                        let _ = event_tx_clone.send(Event::StateUpdated(new_state));
-                                                    },
-                                                    Err(e) => {
-                                                        eprintln!("Failed to acquire write lock: {:?}", e);
-                                                    }
-                                                }
-                                            },
-                                            Err(e) => {
-                                                eprintln!("Failed to get stream: {:?}", e);
-                                            }
-                                        }
-                                    }
-                                }
-                            },
-                            RepeatMode::All => {
-                                // Play next song (wrap around if needed)
-                                Self::handle_next(&state_clone, &event_tx_clone, &source_manager_clone, &mut engine_clone).await;
-                            },
-                            RepeatMode::Off => {
-                                // Stop playback
-                                match state_clone.write() {
-                                    Ok(mut state_write) => {
-                                        state_write.status = PlaybackStatus::Ended;
-                                        
-                                        let new_state = state_write.clone();
-                                        let _ = event_tx_clone.send(Event::StateUpdated(new_state));
-                                    },
-                                    Err(e) => {
-                                        eprintln!("Failed to acquire write lock: {:?}", e);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            });
+            // 纯后端模式：移除引擎事件处理
             
             while let Some(CommandWithResponse { command, response_tx }) = command_rx.recv().await {
                 let current_status = {
@@ -353,32 +261,21 @@ impl Controller {
                                     }
                                 };
                                 
-                                match source_manager.get_stream(&song_id).await {
-                                    Ok(stream) => {
-                                        engine.play(stream);
-                                        
-                                        let mut state_write = match state.write() {
-                                            Ok(guard) => guard,
-                                            Err(e) => {
-                                                eprintln!("Failed to acquire write lock: {:?}", e);
-                                                let error = CommandResult::Error(format!("Failed to acquire write lock: {:?}", e));
-                                                response_tx.send(error).ok();
-                                                continue;
-                                            }
-                                        };
-                                        state_write.status = PlaybackStatus::Playing;
-                                        
-                                        let new_state = state_write.clone();
-                                        let _ = event_tx.send(Event::StateUpdated(new_state));
-                                        CommandResult::Ok
-                                    }
+                                // 纯后端模式：不执行实际播放，只更新状态
+                                let mut state_write = match state.write() {
+                                    Ok(guard) => guard,
                                     Err(e) => {
-                                        eprintln!("Failed to get stream: {:?}", e);
-                                        let error = CommandResult::Error(format!("Failed to get stream: {:?}", e));
+                                        eprintln!("Failed to acquire write lock: {:?}", e);
+                                        let error = CommandResult::Error(format!("Failed to acquire write lock: {:?}", e));
                                         response_tx.send(error).ok();
                                         continue;
                                     }
-                                }
+                                };
+                                state_write.status = PlaybackStatus::Playing;
+                                
+                                let new_state = state_write.clone();
+                                let _ = event_tx.send(Event::StateUpdated(new_state));
+                                CommandResult::Ok
                             }
                             PlaybackStatus::Playing => {
                                 let error = CommandResult::Error("Already playing".to_string());
@@ -395,22 +292,21 @@ impl Controller {
                     Command::Pause => {
                         match current_status {
                             PlaybackStatus::Playing => {
-                                engine.pause();
-                        
-                        let mut state_write = match state.write() {
-                            Ok(guard) => guard,
-                            Err(e) => {
-                                eprintln!("Failed to acquire write lock: {:?}", e);
-                                let error = CommandResult::Error(format!("Failed to acquire write lock: {:?}", e));
-                                response_tx.send(error).ok();
-                                continue;
-                            }
-                        };
-                        state_write.status = PlaybackStatus::Paused;
-                        
-                        let new_state = state_write.clone();
-                        let _ = event_tx.send(Event::StateUpdated(new_state));
-                        CommandResult::Ok
+                                // 纯后端模式：不执行实际暂停，只更新状态
+                                let mut state_write = match state.write() {
+                                    Ok(guard) => guard,
+                                    Err(e) => {
+                                        eprintln!("Failed to acquire write lock: {:?}", e);
+                                        let error = CommandResult::Error(format!("Failed to acquire write lock: {:?}", e));
+                                        response_tx.send(error).ok();
+                                        continue;
+                                    }
+                                };
+                                state_write.status = PlaybackStatus::Paused;
+                                
+                                let new_state = state_write.clone();
+                                let _ = event_tx.send(Event::StateUpdated(new_state));
+                                CommandResult::Ok
                             }
                             _ => {
                                 let error = CommandResult::Error(format!("Cannot pause in {} state", current_status));
@@ -422,23 +318,22 @@ impl Controller {
                     Command::Stop => {
                         match current_status {
                             PlaybackStatus::Playing | PlaybackStatus::Paused | PlaybackStatus::Ended => {
-                                engine.stop();
-                        
-                        let mut state_write = match state.write() {
-                            Ok(guard) => guard,
-                            Err(e) => {
-                                eprintln!("Failed to acquire write lock: {:?}", e);
-                                let error = CommandResult::Error(format!("Failed to acquire write lock: {:?}", e));
-                                response_tx.send(error).ok();
-                                continue;
-                            }
-                        };
-                        state_write.status = PlaybackStatus::Stopped;
-                        state_write.position = 0;
-                        
-                        let new_state = state_write.clone();
-                        let _ = event_tx.send(Event::StateUpdated(new_state));
-                        CommandResult::Ok
+                                // 纯后端模式：不执行实际停止，只更新状态
+                                let mut state_write = match state.write() {
+                                    Ok(guard) => guard,
+                                    Err(e) => {
+                                        eprintln!("Failed to acquire write lock: {:?}", e);
+                                        let error = CommandResult::Error(format!("Failed to acquire write lock: {:?}", e));
+                                        response_tx.send(error).ok();
+                                        continue;
+                                    }
+                                };
+                                state_write.status = PlaybackStatus::Stopped;
+                                state_write.position = 0;
+                                
+                                let new_state = state_write.clone();
+                                let _ = event_tx.send(Event::StateUpdated(new_state));
+                                CommandResult::Ok
                             }
                             _ => {
                                 let error = CommandResult::Error(format!("Cannot stop in {} state", current_status));
@@ -449,7 +344,7 @@ impl Controller {
                     },
                     Command::Next => {
                         // Next is allowed in any state with a queue
-                        let result = Self::handle_next(&state, &event_tx, &source_manager, &mut engine).await;
+                        let result = Self::handle_next(&state, &event_tx, &source_manager).await;
                         if let CommandResult::Error(_) = result {
                             response_tx.send(result).ok();
                             continue;
@@ -458,7 +353,7 @@ impl Controller {
                     },
                     Command::Prev => {
                         // Prev is allowed in any state with a queue
-                        let result = Self::handle_prev(&state, &event_tx, &source_manager, &mut engine).await;
+                        let result = Self::handle_prev(&state, &event_tx, &source_manager).await;
                         if let CommandResult::Error(_) = result {
                             response_tx.send(result).ok();
                             continue;
@@ -602,7 +497,7 @@ impl Controller {
                     },
                     Command::PlayAtIndex { index } => {
                         // PlayAtIndex is allowed in any state with a queue
-                        let (track, track_id) = {
+                        let (track, _track_id) = {
                             let state_read = match state.read() {
                                 Ok(guard) => guard,
                                 Err(e) => {
@@ -624,35 +519,24 @@ impl Controller {
                             }
                         };
                         
-                        match source_manager.get_stream(&track_id).await {
-                            Ok(stream) => {
-                                engine.play(stream);
-                                
-                                let mut state_write = match state.write() {
-                                    Ok(guard) => guard,
-                                    Err(e) => {
-                                        eprintln!("Failed to acquire write lock: {:?}", e);
-                                        let error = CommandResult::Error(format!("Failed to acquire write lock: {:?}", e));
-                                        response_tx.send(error).ok();
-                                        continue;
-                                    }
-                                };
-                                state_write.current = Some(track);
-                                state_write.queue.current_index = Some(index);
-                                state_write.status = PlaybackStatus::Playing;
-                                state_write.position = 0;
-                                
-                                let new_state = state_write.clone();
-                                let _ = event_tx.send(Event::StateUpdated(new_state));
-                                CommandResult::Ok
-                            }
+                        // 纯后端模式：不执行实际播放，只更新状态
+                        let mut state_write = match state.write() {
+                            Ok(guard) => guard,
                             Err(e) => {
-                                eprintln!("Failed to get stream: {:?}", e);
-                                let error = CommandResult::Error(format!("Failed to get stream: {:?}", e));
+                                eprintln!("Failed to acquire write lock: {:?}", e);
+                                let error = CommandResult::Error(format!("Failed to acquire write lock: {:?}", e));
                                 response_tx.send(error).ok();
                                 continue;
                             }
-                        }
+                        };
+                        state_write.current = Some(track);
+                        state_write.queue.current_index = Some(index);
+                        state_write.status = PlaybackStatus::Playing;
+                        state_write.position = 0;
+                        
+                        let new_state = state_write.clone();
+                        let _ = event_tx.send(Event::StateUpdated(new_state));
+                        CommandResult::Ok
                     },
                 };
                 
@@ -667,8 +551,7 @@ impl Controller {
     async fn handle_next(
         state: &Arc<RwLock<PlayerState>>,
         event_tx: &broadcast::Sender<Event>,
-        source_manager: &Arc<SourceManager>,
-        engine: &mut Engine,
+        _source_manager: &Arc<SourceManager>,
     ) -> CommandResult {
         let (next_index, track) = {
             let state_read = match state.read() {
@@ -703,31 +586,22 @@ impl Controller {
         };
         
         if let (Some(index), Some(track)) = (next_index, track) {
-            match source_manager.get_stream(&track.id).await {
-                Ok(stream) => {
-                    engine.play(stream);
-                    
-                    let mut state_write = match state.write() {
-                        Ok(guard) => guard,
-                        Err(e) => {
-                            eprintln!("Failed to acquire write lock: {:?}", e);
-                            return CommandResult::Error(format!("Failed to acquire write lock: {:?}", e));
-                        }
-                    };
-                    state_write.current = Some(track);
-                    state_write.queue.current_index = Some(index);
-                    state_write.status = PlaybackStatus::Playing;
-                    state_write.position = 0;
-                    
-                    let new_state = state_write.clone();
-                    let _ = event_tx.send(Event::StateUpdated(new_state));
-                    CommandResult::Ok
-                }
+            // 纯后端模式：不执行实际播放，只更新状态
+            let mut state_write = match state.write() {
+                Ok(guard) => guard,
                 Err(e) => {
-                    eprintln!("Failed to get stream: {:?}", e);
-                    CommandResult::Error(format!("Failed to get stream: {:?}", e))
+                    eprintln!("Failed to acquire write lock: {:?}", e);
+                    return CommandResult::Error(format!("Failed to acquire write lock: {:?}", e));
                 }
-            }
+            };
+            state_write.current = Some(track);
+            state_write.queue.current_index = Some(index);
+            state_write.status = PlaybackStatus::Playing;
+            state_write.position = 0;
+            
+            let new_state = state_write.clone();
+            let _ = event_tx.send(Event::StateUpdated(new_state));
+            CommandResult::Ok
         } else {
             CommandResult::Error("No next song available".to_string())
         }
@@ -736,8 +610,7 @@ impl Controller {
     async fn handle_prev(
         state: &Arc<RwLock<PlayerState>>,
         event_tx: &broadcast::Sender<Event>,
-        source_manager: &Arc<SourceManager>,
-        engine: &mut Engine,
+        _source_manager: &Arc<SourceManager>,
     ) -> CommandResult {
         let (prev_index, track) = {
             let state_read = match state.read() {
@@ -772,31 +645,22 @@ impl Controller {
         };
         
         if let (Some(index), Some(track)) = (prev_index, track) {
-            match source_manager.get_stream(&track.id).await {
-                Ok(stream) => {
-                    engine.play(stream);
-                    
-                    let mut state_write = match state.write() {
-                        Ok(guard) => guard,
-                        Err(e) => {
-                            eprintln!("Failed to acquire write lock: {:?}", e);
-                            return CommandResult::Error(format!("Failed to acquire write lock: {:?}", e));
-                        }
-                    };
-                    state_write.current = Some(track);
-                    state_write.queue.current_index = Some(index);
-                    state_write.status = PlaybackStatus::Playing;
-                    state_write.position = 0;
-                    
-                    let new_state = state_write.clone();
-                    let _ = event_tx.send(Event::StateUpdated(new_state));
-                    CommandResult::Ok
-                }
+            // 纯后端模式：不执行实际播放，只更新状态
+            let mut state_write = match state.write() {
+                Ok(guard) => guard,
                 Err(e) => {
-                    eprintln!("Failed to get stream: {:?}", e);
-                    CommandResult::Error(format!("Failed to get stream: {:?}", e))
+                    eprintln!("Failed to acquire write lock: {:?}", e);
+                    return CommandResult::Error(format!("Failed to acquire write lock: {:?}", e));
                 }
-            }
+            };
+            state_write.current = Some(track);
+            state_write.queue.current_index = Some(index);
+            state_write.status = PlaybackStatus::Playing;
+            state_write.position = 0;
+            
+            let new_state = state_write.clone();
+            let _ = event_tx.send(Event::StateUpdated(new_state));
+            CommandResult::Ok
         } else {
             CommandResult::Error("No previous song available".to_string())
         }

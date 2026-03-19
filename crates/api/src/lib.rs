@@ -2,10 +2,13 @@ use axum::{Router, routing::{get, post}, Json, extract::{State, ws::{WebSocket, 
 use axum::http::{StatusCode, Response, header::HeaderMap, response::Builder};
 use axum::body::{Body};
 use axum::response::IntoResponse;
+
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::pin::Pin;
 use tokio::sync::{broadcast, Mutex};
+
+
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 use music_backend_source::AudioStream;
@@ -1155,7 +1158,10 @@ fn build_headers(
         .status(status)
         .header("Accept-Ranges", "bytes")
         .header("Content-Length", content_length.to_string())
-        .header("Content-Type", content_type);
+        .header("Content-Type", content_type)
+        .header("Access-Control-Allow-Origin", "*")
+        .header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        .header("Access-Control-Allow-Headers", "*");
     
     // 如果是 Range 请求，添加 Content-Range 头部
     if let (Some((start, end)), Some(total)) = (range, file_size) {

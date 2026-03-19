@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fs::{File, read_dir};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::io::AsyncRead;
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
 use lofty::{AudioFile, TaggedFile, TaggedFileExt, LoftyError, Accessor, ParseOptions};

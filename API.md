@@ -1,254 +1,400 @@
-# 音乐播放器后端 API 文档
+# LaetiBeat Server API 文档
 
 ## 概述
 
-本文档描述了音乐播放器后端的 API 接口，包括 V1 和 V2 版本的接口。V1 接口保持向后兼容，V2 接口提供了更丰富的功能和统一的响应格式。
+LaetiBeat Server 提供了一套完整的 RESTful API，用于控制音乐播放器和获取音乐库信息。同时，还提供了 WebSocket 接口用于实时获取播放器状态。
 
 ## 基础信息
 
-- **API 基础路径**: `/api`
-- **WebSocket 路径**: `/ws/status`
-- **响应格式**: V2 接口使用统一的 JSON 响应格式
+- **Base URL**: `http://localhost:3000`
+- **API Version**: v1, v2
+- **Content-Type**: `application/json`
+- **WebSocket Endpoint**: `ws://localhost:3000/ws/status`
 
-## 统一响应结构 (V2)
+## 响应格式
+
+所有 API 响应都采用统一的格式：
+
+### V1 响应格式
+
+V1 接口直接返回 HTTP 状态码，无 JSON 响应体。
+
+### V2 响应格式
 
 ```json
 {
   "success": true,
   "data": null,
   "state": {
-    "current": null,
-    "status": "idle",
-    "position": 0,
-    "duration": 0,
+    "status": "Playing",
+    "current": {
+      "id": "local:C:/Users/otoya/Music/song.mp3",
+      "title": "Song Title",
+      "artist": "Artist Name",
+      "album": "Album Name",
+      "duration": 240000,
+      "source": "local"
+    },
+    "position": 120000,
+    "duration": 240000,
     "queue": {
-      "tracks": [],
-      "original_order": [],
-      "current_index": null,
+      "tracks": [
+        {
+          "id": "local:C:/Users/otoya/Music/song1.mp3",
+          "title": "Song 1",
+          "artist": "Artist 1",
+          "album": "Album 1",
+          "duration": 240000,
+          "source": "local"
+        }
+      ],
+      "current_index": 0,
       "shuffle": false,
-      "repeat": "off"
+      "repeat": "Off",
+      "original_order": [
+        {
+          "id": "local:C:/Users/otoya/Music/song1.mp3",
+          "title": "Song 1",
+          "artist": "Artist 1",
+          "album": "Album 1",
+          "duration": 240000,
+          "source": "local"
+        }
+      ]
     }
   },
   "error": null
 }
 ```
 
-### 响应字段说明
+## API 端点
 
-- `success`: 布尔值，表示请求是否成功
-- `data`: 可选，包含请求的具体数据
-- `state`: 播放器当前状态
-- `error`: 可选，包含错误信息
+### V1 接口（兼容旧版本）
 
-## V1 接口
+#### 播放控制
 
-### 播放控制
+| 方法   | 端点                | 描述      | 响应                            |
+| ---- | ----------------- | ------- | ----------------------------- |
+| POST | `/api/v1/play`    | 开始播放    | 200 OK                        |
+| POST | `/api/v1/pause`   | 暂停播放    | 200 OK                        |
+| POST | `/api/v1/stop`    | 停止播放    | 200 OK                        |
+| POST | `/api/v1/load`    | 加载歌曲    | 200 OK                        |
+| GET  | `/api/v1/status`  | 获取播放器状态 | 200 OK (PlayerState JSON)     |
+| GET  | `/api/v1/library` | 获取音乐库   | 200 OK (LibraryResponse JSON) |
 
-| 接口 | 方法 | 描述 | 响应 |
-|------|------|------|------|
-| `/api/v1/play` | POST | 开始播放 | 200 OK |
-| `/api/v1/pause` | POST | 暂停播放 | 200 OK |
-| `/api/v1/stop` | POST | 停止播放 | 200 OK |
-| `/api/v1/load` | POST | 加载歌曲 | 200 OK |
+#### 加载歌曲请求体
 
-### 数据获取
+```json
+{
+  "song_id": "local:C:/Users/otoya/Music/song.mp3"
+}
+```
 
-| 接口 | 方法 | 描述 | 响应 |
-|------|------|------|------|
-| `/api/v1/status` | GET | 获取播放器状态 | PlayerState JSON |
-| `/api/v1/library` | GET | 获取音乐库 | 歌曲列表 JSON |
+### V2 接口
 
-## V2 接口
+#### 播放控制
 
-### 播放控制
+| 方法   | 端点                | 描述      | 响应                   |
+| ---- | ----------------- | ------- | -------------------- |
+| POST | `/api/v2/play`    | 开始播放    | 200 OK (ApiResponse) |
+| POST | `/api/v2/pause`   | 暂停播放    | 200 OK (ApiResponse) |
+| POST | `/api/v2/stop`    | 停止播放    | 200 OK (ApiResponse) |
+| POST | `/api/v2/load`    | 加载歌曲    | 200 OK (ApiResponse) |
+| POST | `/api/v2/next`    | 下一曲     | 200 OK (ApiResponse) |
+| POST | `/api/v2/prev`    | 上一曲     | 200 OK (ApiResponse) |
+| GET  | `/api/v2/status`  | 获取播放器状态 | 200 OK (ApiResponse) |
+| GET  | `/api/v2/library` | 获取音乐库   | 200 OK (ApiResponse) |
 
-| 接口 | 方法 | 描述 | 请求体 | 响应 |
-|------|------|------|--------|------|
-| `/api/v2/play` | POST | 开始播放 | N/A | 统一响应格式 |
-| `/api/v2/pause` | POST | 暂停播放 | N/A | 统一响应格式 |
-| `/api/v2/stop` | POST | 停止播放 | N/A | 统一响应格式 |
-| `/api/v2/load` | POST | 加载歌曲 | `{"song_id": "string"}` | 统一响应格式 |
-| `/api/v2/next` | POST | 下一首 | N/A | 统一响应格式 |
-| `/api/v2/prev` | POST | 上一首 | N/A | 统一响应格式 |
+#### 队列管理
 
-### 队列管理
+| 方法   | 端点                      | 描述         | 响应                   |
+| ---- | ----------------------- | ---------- | -------------------- |
+| POST | `/api/v2/queue/add`     | 添加歌曲到队列    | 200 OK (ApiResponse) |
+| POST | `/api/v2/queue/remove`  | 从队列移除歌曲    | 200 OK (ApiResponse) |
+| POST | `/api/v2/queue/clear`   | 清空队列       | 200 OK (ApiResponse) |
+| POST | `/api/v2/queue/shuffle` | 设置随机播放     | 200 OK (ApiResponse) |
+| POST | `/api/v2/queue/repeat`  | 设置循环模式     | 200 OK (ApiResponse) |
+| POST | `/api/v2/queue/play`    | 播放队列中的指定歌曲 | 200 OK (ApiResponse) |
 
-| 接口 | 方法 | 描述 | 请求体 | 响应 |
-|------|------|------|--------|------|
-| `/api/v2/queue/add` | POST | 添加到队列 | `{"song_id": "string"}` | 统一响应格式 |
-| `/api/v2/queue/remove` | POST | 从队列移除 | `{"index": 0}` | 统一响应格式 |
-| `/api/v2/queue/clear` | POST | 清空队列 | N/A | 统一响应格式 |
-| `/api/v2/queue/shuffle` | POST | 设置随机播放 | `{"enabled": true}` | 统一响应格式 |
-| `/api/v2/queue/repeat` | POST | 设置重复模式 | `{"mode": "off"}` | 统一响应格式 |
-| `/api/v2/queue/play` | POST | 播放队列中的指定歌曲 | `{"index": 0}` | 统一响应格式 |
+#### 加载歌曲请求体
 
-### 数据获取
+```json
+{
+  "song_id": "local:C:/Users/otoya/Music/song.mp3"
+}
+```
 
-| 接口 | 方法 | 描述 | 响应 |
-|------|------|------|------|
-| `/api/v2/status` | GET | 获取播放器状态 | 统一响应格式 |
-| `/api/v2/library` | GET | 获取音乐库 | 统一响应格式 |
+#### 添加到队列请求体
+
+```json
+{
+  "song_id": "local:C:/Users/otoya/Music/song.mp3"
+}
+```
+
+#### 从队列移除请求体
+
+```json
+{
+  "index": 0
+}
+```
+
+#### 设置随机播放请求体
+
+```json
+{
+  "enabled": true
+}
+```
+
+#### 设置循环模式请求体
+
+```json
+{
+  "mode": "Off" // 可选值: Off, One, All
+}
+```
+
+#### 播放队列中的指定歌曲请求体
+
+```json
+{
+  "index": 0
+}
+```
+
+### 音频流接口
+
+| 方法  | 端点                   | 描述    | 响应                           |
+| --- | -------------------- | ----- | ---------------------------- |
+| GET | `/api/v2/stream/:id` | 获取音频流 | 200 OK 或 206 Partial Content |
+
+#### 示例
+
+```bash
+GET http://localhost:3000/api/v2/stream/local:C:/Users/otoya/Music/song.mp3
+```
+
+#### 支持的 Range 请求
+
+```bash
+GET http://localhost:3000/api/v2/stream/local:C:/Users/otoya/Music/song.mp3
+Range: bytes=0-999
+```
 
 ## WebSocket 接口
 
-### `/ws/status`
+### 状态更新
 
-**描述**: 实时获取播放器状态更新
+**端点**: `ws://localhost:3000/ws/status`
 
-**连接方式**: `ws://localhost:3000/ws/status`
+#### 连接建立
 
-**消息格式**:
-- 服务器发送: JSON 格式的 PlayerState
-- 客户端发送: 支持 Ping/Pong 消息
+当连接建立时，服务器会发送当前的播放器状态。
 
-**使用示例**:
+#### 消息格式
 
-```javascript
-const socket = new WebSocket('ws://localhost:3000/ws/status');
+服务器会发送 JSON 格式的播放器状态更新：
 
-socket.onopen = () => {
-  console.log('WebSocket connected');
-};
-
-socket.onmessage = (event) => {
-  const state = JSON.parse(event.data);
-  console.log('Player state updated:', state);
-};
-
-socket.onclose = () => {
-  console.log('WebSocket disconnected');
-};
+```json
+{
+  "status": "Playing",
+  "current": {
+    "id": "local:C:/Users/otoya/Music/song.mp3",
+    "title": "Song Title",
+    "artist": "Artist Name",
+    "album": "Album Name",
+    "duration": 240000,
+    "source": "local"
+  },
+  "position": 120000,
+  "duration": 240000,
+  "queue": {
+    "tracks": [
+      {
+        "id": "local:C:/Users/otoya/Music/song1.mp3",
+        "title": "Song 1",
+        "artist": "Artist 1",
+        "album": "Album 1",
+        "duration": 240000,
+        "source": "local"
+      }
+    ],
+    "current_index": 0,
+    "shuffle": false,
+    "repeat": "Off",
+    "original_order": [
+      {
+        "id": "local:C:/Users/otoya/Music/song1.mp3",
+        "title": "Song 1",
+        "artist": "Artist 1",
+        "album": "Album 1",
+        "duration": 240000,
+        "source": "local"
+      }
+    ]
+  }
+}
 ```
 
-## 数据模型
+## 数据结构
+
+### Track
+
+```json
+{
+  "id": "local:C:/Users/otoya/Music/song.mp3",
+  "title": "Song Title",
+  "artist": "Artist Name",
+  "album": "Album Name",
+  "duration": 240000, // 毫秒
+  "source": "local"
+}
+```
 
 ### PlayerState
 
 ```json
 {
-  "current": {
-    "id": "string",
-    "title": "string",
-    "artist": "string",
-    "album": "string",
-    "duration": 0,
-    "path": "string"
-  },
-  "status": "idle",
-  "position": 0,
-  "duration": 0,
+  "status": "Playing", // 可选值: Idle, Playing, Paused, Stopped, Ended
+  "current": { /* Track 对象 */ },
+  "position": 120000, // 当前播放位置（毫秒）
+  "duration": 240000, // 总时长（毫秒）
   "queue": {
-    "tracks": [],
-    "original_order": [],
-    "current_index": null,
+    "tracks": [ /* Track 对象数组 */ ],
+    "current_index": 0,
     "shuffle": false,
-    "repeat": "off"
+    "repeat": "Off", // 可选值: Off, One, All
+    "original_order": [ /* Track 对象数组 */ ]
   }
 }
 ```
 
-### Song
+### ApiResponse
 
 ```json
 {
-  "id": "string",
-  "title": "string",
-  "artist": "string",
-  "album": "string",
-  "duration": 0,
-  "path": "string"
+  "success": true,
+  "data": null, // 或具体数据
+  "state": { /* PlayerState 对象 */ },
+  "error": null // 或错误对象
 }
 ```
 
-### RepeatMode
+### ApiError
 
-- `off`: 不重复
-- `one`: 单曲循环
-- `all`: 全部循环
+```json
+{
+  "code": "ERROR_CODE",
+  "message": "Error message"
+}
+```
 
-### PlaybackStatus
+## 错误处理
 
-- `idle`: 空闲
-- `playing`: 播放中
-- `paused`: 暂停
-- `stopped`: 停止
-- `ended`: 结束
+| 状态码 | 描述                                 |
+| --- | ---------------------------------- |
+| 400 | Bad Request - 请求参数错误               |
+| 404 | Not Found - 资源不存在                  |
+| 416 | Range Not Satisfiable - Range 请求无效 |
+| 500 | Internal Server Error - 服务器内部错误    |
 
-## 错误码
+## 示例使用
 
-| 错误码 | 描述 |
-|--------|------|
-| `PLAY_ERROR` | 播放失败 |
-| `PAUSE_ERROR` | 暂停失败 |
-| `STOP_ERROR` | 停止失败 |
-| `LOAD_ERROR` | 加载失败 |
-| `NEXT_ERROR` | 下一首失败 |
-| `PREV_ERROR` | 上一首失败 |
-| `ADD_TO_QUEUE_ERROR` | 添加到队列失败 |
-| `REMOVE_FROM_QUEUE_ERROR` | 从队列移除失败 |
-| `CLEAR_QUEUE_ERROR` | 清空队列失败 |
-| `SET_SHUFFLE_ERROR` | 设置随机播放失败 |
-| `SET_REPEAT_ERROR` | 设置重复模式失败 |
-| `PLAY_AT_INDEX_ERROR` | 播放队列中的指定歌曲失败 |
-| `INTERNAL_ERROR` | 内部错误 |
-
-## 使用示例
-
-### 加载并播放歌曲
+### 1. 获取音乐库
 
 ```bash
-# 加载歌曲
+curl http://localhost:3000/api/v2/library
+```
+
+### 2. 加载并播放歌曲
+
+```bash
 curl -X POST http://localhost:3000/api/v2/load \
   -H "Content-Type: application/json" \
-  -d '{"song_id": "local:path/to/song.mp3"}'
+  -d '{"song_id": "local:C:/Users/otoya/Music/song.mp3"}'
 
-# 开始播放
 curl -X POST http://localhost:3000/api/v2/play
 ```
 
-### 管理队列
+### 3. 控制播放
 
 ```bash
-# 添加到队列
+# 暂停
+curl -X POST http://localhost:3000/api/v2/pause
+
+# 继续播放
+curl -X POST http://localhost:3000/api/v2/play
+
+# 停止
+curl -X POST http://localhost:3000/api/v2/stop
+
+# 下一曲
+curl -X POST http://localhost:3000/api/v2/next
+
+# 上一曲
+curl -X POST http://localhost:3000/api/v2/prev
+```
+
+### 4. 队列管理
+
+```bash
+# 添加歌曲到队列
 curl -X POST http://localhost:3000/api/v2/queue/add \
   -H "Content-Type: application/json" \
-  -d '{"song_id": "local:path/to/another_song.mp3"}'
+  -d '{"song_id": "local:C:/Users/otoya/Music/song2.mp3"}'
 
-# 设置随机播放
+# 从队列移除歌曲
+curl -X POST http://localhost:3000/api/v2/queue/remove \
+  -H "Content-Type: application/json" \
+  -d '{"index": 0}'
+
+# 清空队列
+curl -X POST http://localhost:3000/api/v2/queue/clear
+
+# 开启随机播放
 curl -X POST http://localhost:3000/api/v2/queue/shuffle \
   -H "Content-Type: application/json" \
   -d '{"enabled": true}'
 
-# 设置重复模式
+# 设置循环模式为单曲循环
 curl -X POST http://localhost:3000/api/v2/queue/repeat \
   -H "Content-Type: application/json" \
-  -d '{"mode": "all"}'
+  -d '{"mode": "One"}'
+
+# 播放队列中的第二首歌曲
+curl -X POST http://localhost:3000/api/v2/queue/play \
+  -H "Content-Type: application/json" \
+  -d '{"index": 1}'
 ```
 
-### 获取状态
+### 5. 流式播放
 
 ```bash
-# 获取当前状态
-curl http://localhost:3000/api/v2/status
+# 完整播放
+curl http://localhost:3000/api/v2/stream/local:C:/Users/otoya/Music/song.mp3 \
+  -o song.mp3
 
-# 获取音乐库
-curl http://localhost:3000/api/v2/library
+# 部分播放（Range 请求）
+curl http://localhost:3000/api/v2/stream/local:C:/Users/otoya/Music/song.mp3 \
+  -H "Range: bytes=0-999" \
+  -o partial_song.mp3
 ```
+
+## 最佳实践
+
+1. **使用 V2 接口**：V2 接口提供了更完整的响应信息和错误处理
+2. **使用 WebSocket**：对于需要实时状态更新的应用，使用 WebSocket 可以减少 HTTP 请求
+3. **Range 请求**：对于大文件，使用 Range 请求可以实现高效的音频定位
+4. **错误处理**：处理 API 响应中的 error 字段，优雅处理错误情况
+5. **批量操作**：对于队列管理，合理使用批量操作减少 API 调用
 
 ## 注意事项
 
-1. 所有 V2 接口都返回统一的响应格式，包含 `success`、`data`、`state` 和 `error` 字段
-2. 歌曲 ID 格式为 `source:path`，例如 `local:path/to/song.mp3`
-3. WebSocket 连接会自动发送初始状态，并在状态变化时推送更新
-4. 错误响应会包含具体的错误信息，便于调试
+1. **音频格式**：支持 MP3、FLAC、M4A、OGG、WAV 格式
+2. **文件路径**：本地音乐文件路径需要使用绝对路径
+3. **性能**：对于大文件，使用流式传输避免内存溢出
+4. **兼容性**：V1 接口仅用于向后兼容，建议使用 V2 接口
+5. **安全性**：当前实现没有身份验证，建议在生产环境中添加认证机制
 
-## 版本差异
-
-| 特性 | V1 | V2 |
-|------|----|----|
-| 响应格式 | 简单状态码/直接数据 | 统一 JSON 格式 |
-| 错误处理 | 简单状态码 | 详细错误信息 |
-| 队列管理 | 不支持 | 完整支持 |
-| WebSocket | 不支持 | 支持 |
-| 重复模式 | 不支持 | 支持 |
-| 随机播放 | 不支持 | 支持 |
