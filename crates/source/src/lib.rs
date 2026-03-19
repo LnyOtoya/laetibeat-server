@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::fs::{File, read_dir};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::AsyncRead;
@@ -9,6 +8,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use lofty::{AudioFile, TaggedFile, TaggedFileExt, LoftyError, Accessor, ParseOptions};
 use async_trait::async_trait;
+
+// 导入新的 AudioStream 定义
+mod audio_stream;
+pub use audio_stream::AudioStream;
 
 #[derive(Error, Debug)]
 pub enum SourceError {
@@ -28,24 +31,6 @@ pub struct Track {
     pub album: String,    // 不再使用 Option，确保总是有值
     pub duration: u64,    // 不再使用 Option，确保总是有值
     pub source: String,   // 如 "local"
-}
-
-// 音频流抽象
-pub enum AudioStream {
-    File(PathBuf),                                 // 本地文件路径
-    Stream(Pin<Box<dyn AsyncRead + Send + Unpin>>), // 异步流
-    Bytes(Vec<u8>),                                // 内存中的字节
-}
-
-impl std::fmt::Debug for AudioStream {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AudioStream::File(path) => write!(f, "AudioStream::File({:?})", path)?,
-            AudioStream::Stream(_) => write!(f, "AudioStream::Stream(<stream>)")?,
-            AudioStream::Bytes(bytes) => write!(f, "AudioStream::Bytes({} bytes)", bytes.len())?
-        }
-        Ok(())
-    }
 }
 
 use std::pin::Pin;
@@ -236,7 +221,8 @@ impl MusicSource for LocalSource {
             // 从 track.id 中提取路径
             if let Some((_, path_str)) = track.id.split_once(':') {
                 let path = PathBuf::from(path_str);
-                Ok(AudioStream::File(path))
+                let file = tokio::fs::File::open(path).await?;
+                Ok(AudioStream::File(file))
             } else {
                 Err(SourceError::TrackNotFound)
             }

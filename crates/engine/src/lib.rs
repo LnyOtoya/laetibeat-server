@@ -60,10 +60,22 @@ impl Engine {
         
         // 根据 AudioStream 类型创建解码器
         match input {
-            AudioStream::File(path) => {
-                let file = File::open(path).unwrap();
-                let reader = BufReader::new(file);
-                let source = Decoder::new(reader).unwrap();
+            AudioStream::File(mut file) => {
+                // 对于 File 类型，我们需要将 AsyncRead 转换为同步 Read
+                // 这里使用一个简单的方法：读取所有数据到内存中
+                let mut buffer = Vec::new();
+                // 注意：这里在同步上下文中使用了阻塞的方式读取异步流
+                // 在实际生产环境中，应该使用更优雅的方式处理
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        file.read_to_end(&mut buffer).await.unwrap();
+                    });
+                
+                use std::io::Cursor;
+                let cursor = Cursor::new(buffer);
+                let source = Decoder::new(cursor).unwrap();
                 sink.append(source);
             }
             AudioStream::Stream(mut stream) => {
@@ -81,12 +93,6 @@ impl Engine {
                 
                 use std::io::Cursor;
                 let cursor = Cursor::new(buffer);
-                let source = Decoder::new(cursor).unwrap();
-                sink.append(source);
-            }
-            AudioStream::Bytes(bytes) => {
-                use std::io::Cursor;
-                let cursor = Cursor::new(bytes);
                 let source = Decoder::new(cursor).unwrap();
                 sink.append(source);
             }
