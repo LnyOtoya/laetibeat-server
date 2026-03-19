@@ -2,7 +2,7 @@
 
 ## 概述
 
-LaetiBeat Server 提供了一套完整的 RESTful API，用于控制音乐播放器和获取音乐库信息。同时，还提供了 WebSocket 接口用于实时获取播放器状态。
+LaetiBeat Server 是一个纯后端音乐管理服务，提供了一套完整的 RESTful API，用于管理音乐库和播放器状态。所有播放控制由前端处理，后端仅负责状态管理和音频流提供。同时，还提供了 WebSocket 接口用于实时获取播放器状态。
 
 ## 基础信息
 
@@ -73,14 +73,14 @@ V1 接口直接返回 HTTP 状态码，无 JSON 响应体。
 
 #### 播放控制
 
-| 方法   | 端点                | 描述      | 响应                            |
-| ---- | ----------------- | ------- | ----------------------------- |
-| POST | `/api/v1/play`    | 开始播放    | 200 OK                        |
-| POST | `/api/v1/pause`   | 暂停播放    | 200 OK                        |
-| POST | `/api/v1/stop`    | 停止播放    | 200 OK                        |
-| POST | `/api/v1/load`    | 加载歌曲    | 200 OK                        |
-| GET  | `/api/v1/status`  | 获取播放器状态 | 200 OK (PlayerState JSON)     |
-| GET  | `/api/v1/library` | 获取音乐库   | 200 OK (LibraryResponse JSON) |
+| 方法   | 端点                | 描述          | 响应                            |
+| ---- | ----------------- | ----------- | ----------------------------- |
+| POST | `/api/v1/play`    | 更新状态为播放     | 200 OK                        |
+| POST | `/api/v1/pause`   | 更新状态为暂停     | 200 OK                        |
+| POST | `/api/v1/stop`    | 更新状态为停止     | 200 OK                        |
+| POST | `/api/v1/load`    | 加载歌曲并更新状态   | 200 OK                        |
+| GET  | `/api/v1/status`  | 获取播放器状态    | 200 OK (PlayerState JSON)     |
+| GET  | `/api/v1/library` | 获取音乐库      | 200 OK (LibraryResponse JSON) |
 
 #### 加载歌曲请求体
 
@@ -94,16 +94,16 @@ V1 接口直接返回 HTTP 状态码，无 JSON 响应体。
 
 #### 播放控制
 
-| 方法   | 端点                | 描述      | 响应                   |
-| ---- | ----------------- | ------- | -------------------- |
-| POST | `/api/v2/play`    | 开始播放    | 200 OK (ApiResponse) |
-| POST | `/api/v2/pause`   | 暂停播放    | 200 OK (ApiResponse) |
-| POST | `/api/v2/stop`    | 停止播放    | 200 OK (ApiResponse) |
-| POST | `/api/v2/load`    | 加载歌曲    | 200 OK (ApiResponse) |
-| POST | `/api/v2/next`    | 下一曲     | 200 OK (ApiResponse) |
-| POST | `/api/v2/prev`    | 上一曲     | 200 OK (ApiResponse) |
-| GET  | `/api/v2/status`  | 获取播放器状态 | 200 OK (ApiResponse) |
-| GET  | `/api/v2/library` | 获取音乐库   | 200 OK (ApiResponse) |
+| 方法   | 端点                | 描述          | 响应                   |
+| ---- | ----------------- | ----------- | -------------------- |
+| POST | `/api/v2/play`    | 更新状态为播放     | 200 OK (ApiResponse) |
+| POST | `/api/v2/pause`   | 更新状态为暂停     | 200 OK (ApiResponse) |
+| POST | `/api/v2/stop`    | 更新状态为停止     | 200 OK (ApiResponse) |
+| POST | `/api/v2/load`    | 加载歌曲并更新状态   | 200 OK (ApiResponse) |
+| POST | `/api/v2/next`    | 更新状态为下一曲    | 200 OK (ApiResponse) |
+| POST | `/api/v2/prev`    | 更新状态为上一曲    | 200 OK (ApiResponse) |
+| GET  | `/api/v2/status`  | 获取播放器状态    | 200 OK (ApiResponse) |
+| GET  | `/api/v2/library` | 获取音乐库      | 200 OK (ApiResponse) |
 
 #### 队列管理
 
